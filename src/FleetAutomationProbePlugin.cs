@@ -1,9 +1,8 @@
 using System;
 using System.Collections;
-using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
 using BepInEx;
-using Cargo;
 using UnityEngine;
 
 namespace TransOcean2FleetAutomation
@@ -13,40 +12,23 @@ namespace TransOcean2FleetAutomation
     {
         public const string PluginGuid = "com.daogl.transocean2.fleetautomationprobe";
         public const string PluginName = "TransOcean 2 Fleet Automation Probe";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.1.2";
 
-        private DynamicSQLiteController dynamicDb;
-        private StaticSQLiteController staticDb;
-        private ShipFactory shipFactory;
+        private Type dynamicDbType;
+        private Type staticDbType;
+        private Type shipFactoryType;
+        private UnityEngine.Object dynamicDb;
+        private UnityEngine.Object staticDb;
+        private UnityEngine.Object shipFactory;
+        private MethodInfo getAllPlayerShipsMethod;
         private float nextAutoProbeTime;
+        private int startupProbeAttempts;
+        private bool startupProbeDone;
 
         private void Awake()
         {
-            Logger.LogInfo(PluginName + " " + PluginVersion + " loaded. Press F8 in-game to dump fleet automation state.");
-            StartCoroutine(ProbeWhenReady());
-        }
-
-        private IEnumerator ProbeWhenReady()
-        {
-            for (int attempt = 1; attempt <= 60; attempt++)
-            {
-                RefreshReferences();
-                if (dynamicDb != null && staticDb != null && shipFactory != null)
-                {
-                    Logger.LogInfo("Game controllers found after " + attempt + " probe attempt(s). Running read-only fleet dump.");
-                    DumpFleetState("startup");
-                    yield break;
-                }
-
-                if (attempt == 1 || attempt % 10 == 0)
-                {
-                    Logger.LogInfo("Waiting for game controllers. dynamicDb=" + Present(dynamicDb) + ", staticDb=" + Present(staticDb) + ", shipFactory=" + Present(shipFactory));
-                }
-
-                yield return new WaitForSeconds(1f);
-            }
-
-            Logger.LogWarning("Timed out waiting for game controllers. Load into a save/game session and press F8 to probe again.");
+            Logger.LogInfo(PluginName + " " + PluginVersion + " loaded in reflection-only mode. Press F8 in-game to dump fleet automation state.");
+            nextAutoProbeTime = 5f;
         }
 
         private void Update()
@@ -58,58 +40,109 @@ namespace TransOcean2FleetAutomation
 
             if (Time.unscaledTime >= nextAutoProbeTime)
             {
+                if (!startupProbeDone)
+                {
+                    ProbeStartupTick();
+                }
+                else
+                {
+                    nextAutoProbeTime = Time.unscaledTime + 30f;
+                    RefreshReferences();
+                }
+            }
+        }
+
+        private void ProbeStartupTick()
+        {
+            nextAutoProbeTime = Time.unscaledTime + 1f;
+            startupProbeAttempts++;
+            RefreshReferences();
+
+            if (dynamicDb != null && staticDb != null && shipFactory != null)
+            {
+                startupProbeDone = true;
                 nextAutoProbeTime = Time.unscaledTime + 30f;
-                RefreshReferences();
+                Logger.LogInfo("Game controllers found after " + startupProbeAttempts + " delayed probe attempt(s). Running read-only fleet dump.");
+                DumpFleetState("startup");
+                return;
+            }
+
+            if (startupProbeAttempts == 1 || startupProbeAttempts % 10 == 0)
+            {
+                Logger.LogInfo("Waiting for game controllers. dynamicDb=" + Present(dynamicDb) + ", staticDb=" + Present(staticDb) + ", shipFactory=" + Present(shipFactory));
+            }
+
+            if (startupProbeAttempts >= 60)
+            {
+                startupProbeDone = true;
+                nextAutoProbeTime = Time.unscaledTime + 30f;
+                Logger.LogWarning("Timed out waiting for game controllers. Load into a save/game session and press F8 to probe again.");
             }
         }
 
         private void RefreshReferences()
         {
+            ResolveGameTypes();
+
             if (dynamicDb == null)
             {
-                dynamicDb = FindObjectOfType<DynamicSQLiteController>();
+                dynamicDb = FindGameObject(dynamicDbType);
             }
 
             if (staticDb == null)
             {
-                staticDb = FindObjectOfType<StaticSQLiteController>();
+                staticDb = FindGameObject(staticDbType);
             }
 
             if (shipFactory == null)
             {
-                shipFactory = FindObjectOfType<ShipFactory>();
+                shipFactory = FindGameObject(shipFactoryType);
+            }
+
+            if (getAllPlayerShipsMethod == null && dynamicDbType != null)
+            {
+                getAllPlayerShipsMethod = dynamicDbType.GetMethod("GetALLPlayerShips", Type.EmptyTypes);
             }
         }
 
         private void DumpFleetState(string reason)
         {
             RefreshReferences();
-            if (dynamicDb == null)
+            if (dynamicDb == null || getAllPlayerShipsMethod == null)
             {
-                Logger.LogWarning("Cannot dump fleet state: DynamicSQLiteController not found. reason=" + reason);
+                Logger.LogWarning("Cannot dump fleet state: DynamicSQLiteController not ready. reason=" + reason);
                 return;
             }
 
             try
             {
-                List<DynamicTablePlayerShips> ships = dynamicDb.GetALLPlayerShips();
+                IEnumerable ships = getAllPlayerShipsMethod.Invoke(dynamicDb, null) as IEnumerable;
                 if (ships == null)
                 {
                     Logger.LogInfo("Fleet dump (" + reason + "): GetALLPlayerShips returned null.");
                     return;
                 }
 
-                Logger.LogInfo("Fleet dump (" + reason + "): " + ships.Count + " ship(s) visible.");
-                for (int i = 0; i < ships.Count; i++)
+                int count = 0;
+                foreach (object ignored in ships)
                 {
-                    DynamicTablePlayerShips ship = ships[i];
+                    count++;
+                }
+
+                Logger.LogInfo("Fleet dump (" + reason + "): " + count + " ship(s) visible.");
+
+                int index = 0;
+                foreach (object ship in ships)
+                {
                     if (ship == null)
                     {
-                        Logger.LogInfo("  [" + i + "] <null ship>");
+                        Logger.LogInfo("  [" + index + "] <null ship>");
+                        index++;
                         continue;
                     }
 
                     Logger.LogInfo(FormatShip(ship));
+                    index++;
                 }
             }
             catch (Exception ex)
@@ -118,28 +151,78 @@ namespace TransOcean2FleetAutomation
             }
         }
 
-        private string FormatShip(DynamicTablePlayerShips ship)
+        private string FormatShip(object ship)
         {
             StringBuilder sb = new StringBuilder(256);
-            sb.Append("  Ship #").Append(ship.PlayerShipID)
-                .Append(" player=").Append(ship.PlayerID)
-                .Append(" name=\"").Append(ship.Name).Append("\"")
-                .Append(" class=").Append(ship.Class)
-                .Append(" freight=").Append(ship.FreightType)
-                .Append(" status=").Append(ship.Status)
-                .Append(" current=").Append(ship.CurrentHarbor)
-                .Append(" dest=").Append(ship.DestinationHarbor)
-                .Append(" fuel=").Append(ship.FuelLoaded).Append('/').Append(ship.FuelCapacity)
-                .Append(" condition=").Append(ship.Condition)
-                .Append(" routeStep=").Append(ship.AutomateRouteStep)
+            sb.Append("  Ship #").Append(FieldValue(ship, "PlayerShipID"))
+                .Append(" player=").Append(FieldValue(ship, "PlayerID"))
+                .Append(" name=\"").Append(FieldValue(ship, "Name")).Append("\"")
+                .Append(" class=").Append(FieldValue(ship, "Class"))
+                .Append(" freight=").Append(FieldValue(ship, "FreightType"))
+                .Append(" status=").Append(FieldValue(ship, "Status"))
+                .Append(" current=").Append(FieldValue(ship, "CurrentHarbor"))
+                .Append(" dest=").Append(FieldValue(ship, "DestinationHarbor"))
+                .Append(" fuel=").Append(FieldValue(ship, "FuelLoaded")).Append('/').Append(FieldValue(ship, "FuelCapacity"))
+                .Append(" condition=").Append(FieldValue(ship, "Condition"))
+                .Append(" routeStep=").Append(FieldValue(ship, "AutomateRouteStep"))
                 .Append(" route=[")
-                .Append(ship.AutomateRouteStart).Append(" -> ")
-                .Append(ship.AutomateRouteDestination1).Append(" -> ")
-                .Append(ship.AutomateRouteDestination2).Append(" -> ")
-                .Append(ship.AutomateRouteDestination3).Append(" -> ")
-                .Append(ship.AutomateRouteDestination4).Append(']');
+                .Append(FieldValue(ship, "AutomateRouteStart")).Append(" -> ")
+                .Append(FieldValue(ship, "AutomateRouteDestination1")).Append(" -> ")
+                .Append(FieldValue(ship, "AutomateRouteDestination2")).Append(" -> ")
+                .Append(FieldValue(ship, "AutomateRouteDestination3")).Append(" -> ")
+                .Append(FieldValue(ship, "AutomateRouteDestination4")).Append(']');
 
             return sb.ToString();
+        }
+
+        private void ResolveGameTypes()
+        {
+            if (dynamicDbType != null && staticDbType != null && shipFactoryType != null)
+            {
+                return;
+            }
+
+            Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            for (int i = 0; i < assemblies.Length; i++)
+            {
+                Assembly assembly = assemblies[i];
+                if (dynamicDbType == null)
+                {
+                    dynamicDbType = assembly.GetType("Cargo.DynamicSQLiteController", false);
+                }
+
+                if (staticDbType == null)
+                {
+                    staticDbType = assembly.GetType("Cargo.StaticSQLiteController", false);
+                }
+
+                if (shipFactoryType == null)
+                {
+                    shipFactoryType = assembly.GetType("Cargo.ShipFactory", false);
+                }
+            }
+        }
+
+        private static UnityEngine.Object FindGameObject(Type type)
+        {
+            return type == null ? null : UnityEngine.Object.FindObjectOfType(type);
+        }
+
+        private static object FieldValue(object target, string fieldName)
+        {
+            if (target == null)
+            {
+                return "<null>";
+            }
+
+            FieldInfo field = target.GetType().GetField(fieldName, BindingFlags.Public | BindingFlags.Instance);
+            if (field == null)
+            {
+                return "<missing>";
+            }
+
+            object value = field.GetValue(target);
+            return value == null ? "<null>" : value;
         }
 
         private static string Present(UnityEngine.Object obj)

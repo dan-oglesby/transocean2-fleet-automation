@@ -20,9 +20,7 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 & $Csc /nologo /target:library /optimize+ /out:$OutDll `
     /reference:"$BepInExCore\BepInEx.dll" `
     /reference:"$BepInExCore\0Harmony.dll" `
-    /reference:"$Managed\Assembly-CSharp.dll" `
     /reference:"$Managed\UnityEngine.dll" `
-    /reference:"$Managed\UnityEngine.UI.dll" `
     $Source
 
 if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
