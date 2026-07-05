@@ -1,14 +1,40 @@
-# TransOcean 2 Fleet Automation Probe
+# TransOcean 2 Fleet Automation
 
-Experimental BepInEx modding probe for TransOcean 2. The current plugin is read-only: it logs the game's fleet and route automation state so we can verify that a safe modding path exists before adding behavior.
+Experimental live modding work for TransOcean 2 fleet automation.
 
 ## Current status
 
-The probe DLL builds, but the BepInEx loader path is not safe to leave enabled yet. In local smoke tests, BepInEx 5.4.21.0 and 5.4.23.5 both injected successfully, but Unity then reported many missing-script and serialization-layout warnings while loading TransOcean 2 UI scenes. With Doorstop disabled, the game launches cleanly through Steam.
+The direct managed patch path is the current live-mod track. A smoke test patched `Cargo.InitGameStart.Awake()` in `Assembly-CSharp.dll` to call `TransOcean2FleetAutomation.Direct.Loader.Bootstrap()`. The game launched through Steam, stayed running, and logged the direct mod bootstrap without the BepInEx serialization-layout warnings.
+
+The BepInEx loader path is not safe to leave enabled yet. In local smoke tests, BepInEx 5.4.21.0 and 5.4.23.5 both injected successfully, but Unity then reported many missing-script and serialization-layout warnings while loading TransOcean 2 UI scenes. With Doorstop disabled, the game launches cleanly through Steam.
 
 Keep `doorstop_config.ini` set to `enabled = false` for normal play until the loader compatibility issue is solved.
 
-## Current behavior
+## Direct patch behavior
+
+- Builds `TransOcean2FleetAutomation.Direct.dll` without any BepInEx runtime dependency.
+- Copies the direct mod DLL to `TransOcean2_Data/Managed/`.
+- Backs up the original game assembly as `Assembly-CSharp.dll.to2fa-original`.
+- Injects a single call into `Cargo.InitGameStart.Awake()`.
+- Attaches a live Unity `MonoBehaviour`.
+- Logs a heartbeat every 30 seconds.
+- Press `F8` in-game for a smoke-test probe log.
+
+## Direct patch install
+
+Close the game, keep Doorstop disabled, then run:
+
+```powershell
+.\scripts\install-direct-patch.ps1
+```
+
+Restore the original game assembly with:
+
+```powershell
+.\scripts\restore-direct-patch.ps1
+```
+
+## BepInEx probe behavior
 
 - Loads as a BepInEx 5 plugin.
 - Avoids compile-time references to TransOcean 2 game assemblies; it waits and reflects over game types after Unity loads them.
@@ -21,7 +47,7 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Game root: `C:\Program Files (x86)\Steam\steamapps\common\TransOcean2`
 - Source root: this repository, intentionally outside `C:\Users\daogl\Proton Drive`
 
-## Build
+## BepInEx probe build
 
 Install BepInEx 5 x64 into the game root first, then run:
 
@@ -50,4 +76,4 @@ Only enable the loader for controlled smoke tests right now.
 
 ## Safety notes
 
-This probe does not write game state. Avoid multiplayer testing while any loader or plugin is installed.
+The current direct mod only logs and does not write game state. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
