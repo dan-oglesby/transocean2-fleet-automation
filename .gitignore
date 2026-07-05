@@ -1,0 +1,16 @@
+# Build output
+/dist/*.dll
+/dist/*.pdb
+/dist/*.mdb
+
+# Local tooling and downloaded loaders
+/tools/
+
+# Editor cruft
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Logs
+*.log
