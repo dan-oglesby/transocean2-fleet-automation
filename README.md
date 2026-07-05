@@ -18,6 +18,7 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Injects a single call into `Cargo.InitGameStart.Awake()`.
 - Attaches a live Unity `MonoBehaviour`.
 - Adds the first in-game TO2 Fleet Captain panel.
+- Keeps the panel hidden until an active player fleet is loaded.
 - Supports ship-by-ship opt-in toggles.
 - Evaluates enabled ships every 30 seconds in dry-run mode.
 - Scores available jobs from each idle ship's current harbor using payment per travel day, relationship points, and penalty risk.

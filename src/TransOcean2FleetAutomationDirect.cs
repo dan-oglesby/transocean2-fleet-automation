@@ -45,6 +45,7 @@ namespace TransOcean2FleetAutomation.Direct
         private bool showPanel;
         private bool dryRun = true;
         private bool evaluateEnabledShipsEveryTick = true;
+        private bool gameSessionActive;
         private float nextControllerLookup;
         private float nextRefresh;
         private float nextAutomationTick;
@@ -75,7 +76,10 @@ namespace TransOcean2FleetAutomation.Direct
 
             if (Input.GetKeyDown(KeyCode.F8))
             {
-                EvaluateEnabledShips("manual F8");
+                if (IsGameSessionActive())
+                {
+                    EvaluateEnabledShips("manual F8");
+                }
             }
 
             if (Input.GetKeyDown(KeyCode.F10))
@@ -97,7 +101,7 @@ namespace TransOcean2FleetAutomation.Direct
             if (evaluateEnabledShipsEveryTick && Time.realtimeSinceStartup >= nextAutomationTick)
             {
                 nextAutomationTick = Time.realtimeSinceStartup + 30f;
-                if (HasAnyCaptainEnabled())
+                if (IsGameSessionActive() && HasAnyCaptainEnabled())
                 {
                     EvaluateEnabledShips("scheduled dry-run tick");
                 }
@@ -106,7 +110,7 @@ namespace TransOcean2FleetAutomation.Direct
 
         private void OnGUI()
         {
-            if (!showPanel)
+            if (!showPanel || !IsGameSessionActive())
             {
                 return;
             }
@@ -193,6 +197,11 @@ namespace TransOcean2FleetAutomation.Direct
             get { return dsqLite != null && shipFactory != null; }
         }
 
+        private bool IsGameSessionActive()
+        {
+            return gameSessionActive && playerId > 0 && ships.Count > 0;
+        }
+
         private void DrawShipRow(ShipSnapshot ship)
         {
             GUILayout.BeginHorizontal();
@@ -268,14 +277,25 @@ namespace TransOcean2FleetAutomation.Direct
                     }
                 }
 
-                statusText = string.Format("Controllers ready. {0} player ships visible.", ships.Count);
+                gameSessionActive = playerId > 0 && ships.Count > 0;
+                statusText = gameSessionActive
+                    ? string.Format("Controllers ready. {0} player ships visible.", ships.Count)
+                    : "Waiting for an active game fleet...";
                 if (logResult)
                 {
-                    AddDecisionLog(string.Format("Refreshed {0} ships. Treasury {1:n0}.", ships.Count, playerCredits));
+                    if (gameSessionActive)
+                    {
+                        AddDecisionLog(string.Format("Refreshed {0} ships. Treasury {1:n0}.", ships.Count, playerCredits));
+                    }
+                    else
+                    {
+                        Debug.Log(LogPrefix + " Fleet refresh skipped panel availability; no active player fleet yet.");
+                    }
                 }
             }
             catch (Exception ex)
             {
+                gameSessionActive = false;
                 statusText = "Refresh failed: " + ex.Message;
                 Debug.LogError(LogPrefix + " Refresh failed: " + ex);
             }
