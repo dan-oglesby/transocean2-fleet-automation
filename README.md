@@ -17,8 +17,14 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Backs up the original game assembly as `Assembly-CSharp.dll.to2fa-original`.
 - Injects a single call into `Cargo.InitGameStart.Awake()`.
 - Attaches a live Unity `MonoBehaviour`.
-- Logs a heartbeat every 30 seconds.
-- Press `F8` in-game for a smoke-test probe log.
+- Adds the first in-game TO2 Fleet Captain panel.
+- Supports ship-by-ship opt-in toggles.
+- Evaluates enabled ships every 30 seconds in dry-run mode.
+- Scores available jobs from each idle ship's current harbor using payment per travel day, relationship points, and penalty risk.
+- Flags low-condition ships for repair consideration using a simple treasury reserve check.
+- Press `F8` in-game to evaluate enabled ships.
+- Press `F9` in-game to show or hide the panel.
+- Press `F10` in-game to refresh the visible fleet list.
 
 ## Direct patch install
 
@@ -76,4 +82,4 @@ Only enable the loader for controlled smoke tests right now.
 
 ## Safety notes
 
-The current direct mod only logs and does not write game state. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
+The current direct mod is recommendation-only. It logs decisions and persists only the local TO2 Captain UI/toggle preferences through Unity `PlayerPrefs`; it does not dispatch ships, accept jobs, repair ships, upgrade ships, or spend credits yet. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
