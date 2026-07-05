@@ -20,10 +20,11 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Adds the first in-game TO2 Fleet Captain panel.
 - Keeps the panel hidden until an active player fleet is loaded.
 - Supports ship-by-ship opt-in toggles.
-- Evaluates enabled ships every 30 seconds in dry-run mode.
+- Evaluates enabled ships every 30 seconds.
+- Live actions can flip opted-in player ships into the game's native `IsAI` ship state and trigger the built-in AI cast-out path when a ship is idle in harbor.
 - Scores available jobs from each idle ship's current harbor using payment per travel day, relationship points, and penalty risk.
 - Flags low-condition ships for repair consideration using a simple treasury reserve check.
-- Press `F8` in-game to evaluate enabled ships.
+- Press `F8` in-game to run enabled ships.
 - Press `F9` in-game to show or hide the panel.
 - Press `F10` in-game to refresh the visible fleet list.
 
@@ -83,4 +84,4 @@ Only enable the loader for controlled smoke tests right now.
 
 ## Safety notes
 
-The current direct mod is recommendation-only. It logs decisions and persists only the local TO2 Captain UI/toggle preferences through Unity `PlayerPrefs`; it does not dispatch ships, accept jobs, repair ships, upgrade ships, or spend credits yet. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
+The current direct mod can perform live actions when the panel's `Live actions` toggle is on. It uses the game's own player-ship AI state and ship cast-out event path, so enabled ships may accept work, depart, refuel, repair, upgrade, and spend credits according to the base-game AI logic. Turning `Live actions` off restores manual AI state for currently enabled ships. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.

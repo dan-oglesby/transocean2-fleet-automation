@@ -41,9 +41,12 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getPlayerCreditsMethod;
         private MethodInfo getAllPlayerShipsMethod;
         private MethodInfo getJobsFromStartHarborMethod;
+        private MethodInfo updatePlayerShipAiStateMethod;
+        private MethodInfo sendEventMethod;
+        private Type cargoEventType;
 
         private bool showPanel;
-        private bool dryRun = true;
+        private bool liveActions = true;
         private bool evaluateEnabledShipsEveryTick = true;
         private bool gameSessionActive;
         private float nextControllerLookup;
@@ -59,9 +62,9 @@ namespace TransOcean2FleetAutomation.Direct
         {
             Debug.Log(LogPrefix + " Fleet automation captain attached. F8 evaluates enabled ships, F9 toggles panel.");
             showPanel = PlayerPrefs.GetInt("TO2FA.ShowPanel", 1) == 1;
-            dryRun = PlayerPrefs.GetInt("TO2FA.DryRun", 1) == 1;
+            liveActions = PlayerPrefs.GetInt("TO2FA.LiveActions", 1) == 1;
             evaluateEnabledShipsEveryTick = PlayerPrefs.GetInt("TO2FA.TickEnabled", 1) == 1;
-            AddDecisionLog("Captain UI attached. Dry run is ON.");
+            AddDecisionLog("Captain UI attached. Live actions are " + (liveActions ? "ON." : "OFF."));
         }
 
         private void Update()
@@ -103,7 +106,7 @@ namespace TransOcean2FleetAutomation.Direct
                 nextAutomationTick = Time.realtimeSinceStartup + 30f;
                 if (IsGameSessionActive() && HasAnyCaptainEnabled())
                 {
-                    EvaluateEnabledShips("scheduled dry-run tick");
+                    EvaluateEnabledShips("scheduled automation tick");
                 }
             }
         }
@@ -123,13 +126,14 @@ namespace TransOcean2FleetAutomation.Direct
             GUILayout.Label(string.Format("Player {0} treasury: {1:n0}", playerId, playerCredits));
 
             GUILayout.BeginHorizontal();
-            bool newDryRun = GUILayout.Toggle(dryRun, "Dry run", GUILayout.Width(110f));
-            if (newDryRun != dryRun)
+            bool newLiveActions = GUILayout.Toggle(liveActions, "Live actions", GUILayout.Width(125f));
+            if (newLiveActions != liveActions)
             {
-                dryRun = newDryRun;
-                PlayerPrefs.SetInt("TO2FA.DryRun", dryRun ? 1 : 0);
+                liveActions = newLiveActions;
+                PlayerPrefs.SetInt("TO2FA.LiveActions", liveActions ? 1 : 0);
                 PlayerPrefs.Save();
-                AddDecisionLog("Dry run " + (dryRun ? "enabled" : "disabled") + ".");
+                AddDecisionLog("Live actions " + (liveActions ? "enabled." : "disabled; restoring manual control for enabled ships."));
+                SyncNativeAiStateForEnabledShips(liveActions);
             }
 
             bool newTick = GUILayout.Toggle(evaluateEnabledShipsEveryTick, "Evaluate every 30s", GUILayout.Width(180f));
@@ -145,7 +149,7 @@ namespace TransOcean2FleetAutomation.Direct
                 RefreshFleet(true);
             }
 
-            if (GUILayout.Button("Evaluate", GUILayout.Width(100f)))
+            if (GUILayout.Button("Run", GUILayout.Width(100f)))
             {
                 EvaluateEnabledShips("panel button");
             }
@@ -188,7 +192,7 @@ namespace TransOcean2FleetAutomation.Direct
             }
             GUILayout.EndScrollView();
 
-            GUILayout.Label("F8 evaluate enabled ships. F9 hide panel. F10 refresh fleet.");
+            GUILayout.Label("F8 run enabled ships. F9 hide panel. F10 refresh fleet.");
             GUILayout.EndArea();
         }
 
@@ -241,9 +245,21 @@ namespace TransOcean2FleetAutomation.Direct
             getPlayerIdMethod = dsqLiteType.GetMethod("GetPlayerID", Type.EmptyTypes);
             getPlayerCreditsMethod = dsqLiteType.GetMethod("GetPlayerCredits", new Type[] { typeof(int) });
             getAllPlayerShipsMethod = dsqLiteType.GetMethod("GetALLPlayerShips", new Type[] { typeof(int) });
+            updatePlayerShipAiStateMethod = dsqLiteType.GetMethod("UpdatePlayerShipAiState", new Type[] { typeof(int), typeof(bool) });
             getJobsFromStartHarborMethod = dsqLiteType.GetMethod(
                 "GetAllJobsFromStartHarbor",
                 new Type[] { typeof(string), typeof(string), typeof(int) });
+            cargoEventType = FindType("Deck13HH.EventManagement.CargoEventType");
+            Type eventManagerType = FindType("Deck13HH.EventManagement.EventManager");
+            if (eventManagerType != null && cargoEventType != null)
+            {
+                sendEventMethod = eventManagerType.GetMethod(
+                    "SendEvent",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new Type[] { typeof(object), cargoEventType, typeof(object) },
+                    null);
+            }
 
             statusText = "Controllers ready. Toggle ships into TO2 Captain mode.";
             Debug.Log(LogPrefix + " Controllers ready for fleet automation.");
@@ -336,9 +352,14 @@ namespace TransOcean2FleetAutomation.Direct
 
             string prefix = string.Format("#{0} {1}: ", ship.PlayerShipId, ship.Name);
 
+            if (liveActions)
+            {
+                SetNativeAiState(ship, true);
+            }
+
             if (!IsShipIdleInHarbor(ship))
             {
-                AddDecisionLog(prefix + "waiting; ship is not idle in a harbor.");
+                AddDecisionLog(prefix + (liveActions ? "native AI armed; waiting because ship is not idle in a harbor." : "waiting; ship is not idle in a harbor."));
                 return;
             }
 
@@ -363,20 +384,25 @@ namespace TransOcean2FleetAutomation.Direct
             if (bestJob == null)
             {
                 AddDecisionLog(prefix + "no matching unreserved jobs found at " + ship.CurrentHarbor + ".");
-                return;
+            }
+            else
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "best route {0} -> {1}, pay {2:n0}, eta {3}d, score {4:0}.",
+                    bestJob.Start,
+                    bestJob.End,
+                    bestJob.Payment,
+                    bestJob.DistanceInDays,
+                    bestJob.Score));
             }
 
-            AddDecisionLog(prefix + string.Format(
-                "best route {0} -> {1}, pay {2:n0}, eta {3}d, score {4:0}.",
-                bestJob.Start,
-                bestJob.End,
-                bestJob.Payment,
-                bestJob.DistanceInDays,
-                bestJob.Score));
-
-            if (!dryRun)
+            if (liveActions)
             {
-                AddDecisionLog(prefix + "execution is still locked in this build; recommendation only.");
+                TriggerNativeAiCastOut(ship, reason);
+            }
+            else
+            {
+                AddDecisionLog(prefix + "live actions are OFF; recommendation only.");
             }
         }
 
@@ -458,6 +484,78 @@ namespace TransOcean2FleetAutomation.Direct
             AddDecisionLog((enabled ? "Enabled" : "Disabled") + " TO2 Captain mode for all visible ships.");
         }
 
+        private void SyncNativeAiStateForEnabledShips(bool nativeAiEnabled)
+        {
+            for (int i = 0; i < ships.Count; i++)
+            {
+                if (IsCaptainEnabled(ships[i].PlayerShipId))
+                {
+                    SetNativeAiState(ships[i], nativeAiEnabled);
+                    if (nativeAiEnabled && IsShipIdleInHarbor(ships[i]))
+                    {
+                        TriggerNativeAiCastOut(ships[i], "live actions toggled on");
+                    }
+                }
+            }
+        }
+
+        private ShipSnapshot FindShipSnapshot(int playerShipId)
+        {
+            for (int i = 0; i < ships.Count; i++)
+            {
+                if (ships[i].PlayerShipId == playerShipId)
+                {
+                    return ships[i];
+                }
+            }
+
+            return null;
+        }
+
+        private bool SetNativeAiState(ShipSnapshot ship, bool enabled)
+        {
+            if (updatePlayerShipAiStateMethod == null)
+            {
+                AddDecisionLog(string.Format("#{0} {1}: native AI state setter is unavailable.", ship.PlayerShipId, ship.Name));
+                return false;
+            }
+
+            try
+            {
+                updatePlayerShipAiStateMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId, enabled });
+                ship.IsAI = enabled;
+                WriteField(ship.RawShip, "IsAI", enabled);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(string.Format("#{0} {1}: failed to set native AI state: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
+                return false;
+            }
+        }
+
+        private bool TriggerNativeAiCastOut(ShipSnapshot ship, string reason)
+        {
+            if (sendEventMethod == null || cargoEventType == null)
+            {
+                AddDecisionLog(string.Format("#{0} {1}: native event bridge is unavailable.", ship.PlayerShipId, ship.Name));
+                return false;
+            }
+
+            try
+            {
+                object eventValue = Enum.Parse(cargoEventType, "SHIP_CAST_IN_DONE");
+                sendEventMethod.Invoke(null, new object[] { this, eventValue, ship.PlayerShipId });
+                AddDecisionLog(string.Format("#{0} {1}: native AI triggered from {2}.", ship.PlayerShipId, ship.Name, reason));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(string.Format("#{0} {1}: failed to trigger native AI: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
+                return false;
+            }
+        }
+
         private bool HasAnyCaptainEnabled()
         {
             foreach (KeyValuePair<int, bool> pair in captainEnabledByShipId)
@@ -482,6 +580,21 @@ namespace TransOcean2FleetAutomation.Direct
             captainEnabledByShipId[playerShipId] = enabled;
             PlayerPrefs.SetInt(CaptainPrefsPrefix + playerShipId, enabled ? 1 : 0);
             PlayerPrefs.Save();
+
+            ShipSnapshot ship = FindShipSnapshot(playerShipId);
+            if (ship != null && liveActions)
+            {
+                if (enabled)
+                {
+                    AddDecisionLog(string.Format("#{0} {1}: TO2 Captain enabled; arming native AI.", ship.PlayerShipId, ship.Name));
+                    EvaluateShip(ship, "toggle");
+                }
+                else
+                {
+                    SetNativeAiState(ship, false);
+                    AddDecisionLog(string.Format("#{0} {1}: TO2 Captain disabled; native AI state restored to manual.", ship.PlayerShipId, ship.Name));
+                }
+            }
         }
 
         private void EnsureCaptainPreferenceLoaded(int playerShipId)
@@ -592,6 +705,20 @@ namespace TransOcean2FleetAutomation.Direct
             return field == null ? null : field.GetValue(instance);
         }
 
+        private static void WriteField(object instance, string fieldName, object value)
+        {
+            if (instance == null)
+            {
+                return;
+            }
+
+            FieldInfo field = instance.GetType().GetField(fieldName, BindingFlags.Public | BindingFlags.Instance);
+            if (field != null)
+            {
+                field.SetValue(instance, value);
+            }
+        }
+
         private static string ReadString(object instance, string fieldName)
         {
             object value = ReadField(instance, fieldName);
@@ -691,6 +818,7 @@ namespace TransOcean2FleetAutomation.Direct
             public string CurrentHarbor;
             public string DestinationHarbor;
             public string Status;
+            public bool IsAI;
             public object RawShip;
 
             public static ShipSnapshot From(object rawShip)
@@ -708,6 +836,7 @@ namespace TransOcean2FleetAutomation.Direct
                 snapshot.CurrentHarbor = ReadString(rawShip, "CurrentHarbor");
                 snapshot.DestinationHarbor = ReadString(rawShip, "DestinationHarbor");
                 snapshot.Status = ReadString(rawShip, "Status");
+                snapshot.IsAI = ReadBool(rawShip, "IsAI");
                 return snapshot;
             }
         }
