@@ -455,6 +455,7 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             string prefix = string.Format("#{0} {1}: ", ship.PlayerShipId, ship.Name);
+            long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
 
             if (IsRepairPending(ship))
             {
@@ -463,43 +464,15 @@ namespace TransOcean2FleetAutomation.Direct
                 return;
             }
 
-            if (!IsShipIdleInHarbor(ship))
+            if (ship.Condition < minimumSailCondition)
             {
-                if (liveActions && ship.Condition < minimumSailCondition)
-                {
-                    SetNativeAiState(ship, false);
-                    if (IsHeadingToRepairDock(ship))
-                    {
-                        AddDecisionLog(prefix + string.Format("heading to repair dock at {0}; condition {1:0}% is below sail minimum {2:0}%.", ship.DestinationHarbor, ship.Condition, minimumSailCondition));
-                    }
-                    else
-                    {
-                        AddDecisionLog(prefix + string.Format("manual safety hold armed while away/working; condition {0:0}% is below sail minimum {1:0}%.", ship.Condition, minimumSailCondition));
-                    }
-                }
-                else
-                {
-                    AddDecisionLog(prefix + (liveActions ? "native AI armed; waiting because ship is not idle in a harbor." : "waiting; ship is not idle in a harbor."));
-                }
+                HandleLowConditionShip(ship, prefix, reserve);
                 return;
             }
 
-            long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
-            if (ship.Condition < minimumSailCondition)
+            if (!IsShipIdleInHarbor(ship))
             {
-                SetNativeAiState(ship, false);
-                if (liveActions && autoRepairs)
-                {
-                    TryHandleRepairNeed(ship, prefix, reserve);
-                }
-                else if (playerCredits > reserve)
-                {
-                    AddDecisionLog(prefix + string.Format("held for maintenance: {0:0}% condition is below sail minimum {1:0}%. Repair before automation sends it out.", ship.Condition, minimumSailCondition));
-                }
-                else
-                {
-                    AddDecisionLog(prefix + string.Format("held for maintenance: {0:0}% condition is below sail minimum {1:0}%, but treasury is near reserve {2:n0}.", ship.Condition, minimumSailCondition, reserve));
-                }
+                AddDecisionLog(prefix + (liveActions ? "native AI armed; waiting because ship is not idle in a harbor." : "waiting; ship is not idle in a harbor."));
                 return;
             }
 
@@ -536,6 +509,38 @@ namespace TransOcean2FleetAutomation.Direct
             else
             {
                 AddDecisionLog(prefix + "live actions are OFF; recommendation only.");
+            }
+        }
+
+        private void HandleLowConditionShip(ShipSnapshot ship, string prefix, long reserve)
+        {
+            SetNativeAiState(ship, false);
+
+            if (liveActions && autoRepairs)
+            {
+                if (HasKnownCurrentHarbor(ship))
+                {
+                    TryHandleRepairNeed(ship, prefix, reserve);
+                }
+                else if (IsHeadingToRepairDock(ship))
+                {
+                    AddDecisionLog(prefix + string.Format("heading to repair dock at {0}; condition {1:0}% is below sail minimum {2:0}%.", ship.DestinationHarbor, ship.Condition, minimumSailCondition));
+                }
+                else
+                {
+                    AddDecisionLog(prefix + string.Format("held for maintenance while underway; condition {0:0}% is below sail minimum {1:0}%. Repair routing will run when it reaches a harbor.", ship.Condition, minimumSailCondition));
+                }
+
+                return;
+            }
+
+            if (playerCredits > reserve)
+            {
+                AddDecisionLog(prefix + string.Format("held for maintenance: {0:0}% condition is below sail minimum {1:0}%. Repair before automation sends it out.", ship.Condition, minimumSailCondition));
+            }
+            else
+            {
+                AddDecisionLog(prefix + string.Format("held for maintenance: {0:0}% condition is below sail minimum {1:0}%, but treasury is near reserve {2:n0}.", ship.Condition, minimumSailCondition, reserve));
             }
         }
 
@@ -815,6 +820,13 @@ namespace TransOcean2FleetAutomation.Direct
                 && IsHarborRepairDock(ship.DestinationHarbor);
         }
 
+        private static bool HasKnownCurrentHarbor(ShipSnapshot ship)
+        {
+            return ship != null
+                && !string.IsNullOrEmpty(ship.CurrentHarbor)
+                && ship.CurrentHarbor != "None";
+        }
+
         private object GetHarbor(string harborName)
         {
             if (getHarborMethod == null || string.IsNullOrEmpty(harborName) || harborName == "None")
@@ -964,7 +976,7 @@ namespace TransOcean2FleetAutomation.Direct
                 return false;
             }
 
-            if (string.IsNullOrEmpty(ship.CurrentHarbor))
+            if (!HasKnownCurrentHarbor(ship))
             {
                 return false;
             }
@@ -1058,17 +1070,9 @@ namespace TransOcean2FleetAutomation.Direct
                     }
                     else if (ships[i].Condition < minimumSailCondition)
                     {
-                        SetNativeAiState(ships[i], false);
                         string prefix = string.Format("#{0} {1}: ", ships[i].PlayerShipId, ships[i].Name);
-                        if (autoRepairs)
-                        {
-                            long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
-                            TryHandleRepairNeed(ships[i], prefix, reserve);
-                        }
-                        else
-                        {
-                            AddDecisionLog(prefix + string.Format("held for maintenance; condition {0:0}% is below sail minimum {1:0}%.", ships[i].Condition, minimumSailCondition));
-                        }
+                        long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
+                        HandleLowConditionShip(ships[i], prefix, reserve);
                     }
                     else
                     {
