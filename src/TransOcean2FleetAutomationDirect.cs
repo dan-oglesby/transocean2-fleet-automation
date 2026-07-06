@@ -507,7 +507,7 @@ namespace TransOcean2FleetAutomation.Direct
 
             if (!IsShipIdleInHarbor(ship))
             {
-                AddDecisionLog(prefix + (liveActions ? "native AI armed; waiting because ship is not idle in a harbor." : "waiting; ship is not idle in a harbor."));
+                AddDecisionLog(prefix + (liveActions ? "native AI armed; waiting because ship is not idle in a harbor" : "waiting; ship is not idle in a harbor") + " (" + DescribeShipLocationState(ship) + ").");
                 return;
             }
 
@@ -1245,7 +1245,7 @@ namespace TransOcean2FleetAutomation.Direct
                 return false;
             }
 
-            if (!string.IsNullOrEmpty(ship.DestinationHarbor) && ship.DestinationHarbor != ship.CurrentHarbor)
+            if (HasActiveDestination(ship))
             {
                 return false;
             }
@@ -1253,13 +1253,35 @@ namespace TransOcean2FleetAutomation.Direct
             if (!string.IsNullOrEmpty(ship.Status))
             {
                 string status = ship.Status.ToLowerInvariant();
-                if (status.Contains("repair") || status.Contains("upgrade") || status.Contains("cast") || status.Contains("travel"))
+                if (status.Contains("repair") || status.Contains("upgrade") || status.Contains("travel") || status == "minigame_castout")
                 {
                     return false;
                 }
             }
 
             return true;
+        }
+
+        private static bool HasActiveDestination(ShipSnapshot ship)
+        {
+            return ship != null
+                && !IsNoneOrEmpty(ship.DestinationHarbor)
+                && ship.DestinationHarbor != ship.CurrentHarbor;
+        }
+
+        private static bool IsNoneOrEmpty(string value)
+        {
+            return string.IsNullOrEmpty(value) || value == "None";
+        }
+
+        private static string DescribeShipLocationState(ShipSnapshot ship)
+        {
+            return string.Format(
+                "harbor={0}, dest={1}, status={2}, condition={3:0}%",
+                string.IsNullOrEmpty(ship.CurrentHarbor) ? "-" : ship.CurrentHarbor,
+                string.IsNullOrEmpty(ship.DestinationHarbor) ? "-" : ship.DestinationHarbor,
+                string.IsNullOrEmpty(ship.Status) ? "-" : ship.Status,
+                ship.Condition);
         }
 
         private bool IsRepairPending(ShipSnapshot ship)
