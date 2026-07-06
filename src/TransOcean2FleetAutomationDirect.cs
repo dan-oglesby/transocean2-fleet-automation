@@ -36,20 +36,35 @@ namespace TransOcean2FleetAutomation.Direct
         private readonly List<string> decisionLog = new List<string>();
 
         private object dsqLite;
+        private object staticSqLite;
         private object shipFactory;
         private MethodInfo getPlayerIdMethod;
         private MethodInfo getPlayerCreditsMethod;
         private MethodInfo getAllPlayerShipsMethod;
+        private MethodInfo getPlayerShipMethod;
         private MethodInfo getJobsFromStartHarborMethod;
+        private MethodInfo getHarborMethod;
+        private MethodInfo getRepairDockHarborsMethod;
+        private MethodInfo getHarborDistanceMethod;
+        private MethodInfo getRegionOfHarborMethod;
+        private MethodInfo getShipClassesMethod;
+        private MethodInfo repairPlayerShipMethod;
+        private MethodInfo sendShipToDestinationMethod;
+        private MethodInfo getRemainingConditionOnArrivalMethod;
+        private MethodInfo getShipSinkChanceMethod;
+        private MethodInfo getDaysForRepairMethod;
+        private MethodInfo getCurrentDateTimeMethod;
         private MethodInfo updatePlayerShipAiStateMethod;
         private MethodInfo sendEventMethod;
         private Type cargoEventType;
 
         private bool showPanel;
         private bool liveActions = true;
+        private bool autoRepairs = true;
         private bool evaluateEnabledShipsEveryTick = true;
         private bool gameSessionActive;
         private float minimumSailCondition = 85f;
+        private float repairTargetCondition = 100f;
         private float nextControllerLookup;
         private float nextRefresh;
         private float nextAutomationTick;
@@ -64,9 +79,12 @@ namespace TransOcean2FleetAutomation.Direct
             Debug.Log(LogPrefix + " Fleet automation captain attached. F8 evaluates enabled ships, F9 toggles panel.");
             showPanel = PlayerPrefs.GetInt("TO2FA.ShowPanel", 1) == 1;
             liveActions = PlayerPrefs.GetInt("TO2FA.LiveActions", 1) == 1;
+            autoRepairs = PlayerPrefs.GetInt("TO2FA.AutoRepairs", 1) == 1;
             evaluateEnabledShipsEveryTick = PlayerPrefs.GetInt("TO2FA.TickEnabled", 1) == 1;
             minimumSailCondition = PlayerPrefs.GetFloat("TO2FA.MinimumSailCondition", 85f);
             minimumSailCondition = Mathf.Clamp(minimumSailCondition, 50f, 100f);
+            repairTargetCondition = PlayerPrefs.GetFloat("TO2FA.RepairTargetCondition", 100f);
+            repairTargetCondition = Mathf.Clamp(repairTargetCondition, minimumSailCondition, 100f);
             AddDecisionLog("Captain UI attached. Live actions are " + (liveActions ? "ON." : "OFF."));
         }
 
@@ -139,6 +157,15 @@ namespace TransOcean2FleetAutomation.Direct
                 SyncNativeAiStateForEnabledShips(liveActions);
             }
 
+            bool newAutoRepairs = GUILayout.Toggle(autoRepairs, "Auto repairs", GUILayout.Width(120f));
+            if (newAutoRepairs != autoRepairs)
+            {
+                autoRepairs = newAutoRepairs;
+                PlayerPrefs.SetInt("TO2FA.AutoRepairs", autoRepairs ? 1 : 0);
+                PlayerPrefs.Save();
+                AddDecisionLog("Auto repairs " + (autoRepairs ? "enabled." : "disabled."));
+            }
+
             bool newTick = GUILayout.Toggle(evaluateEnabledShipsEveryTick, "Evaluate every 30s", GUILayout.Width(180f));
             if (newTick != evaluateEnabledShipsEveryTick)
             {
@@ -193,6 +220,28 @@ namespace TransOcean2FleetAutomation.Direct
             }
             GUILayout.EndHorizontal();
 
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(string.Format("Repair target condition: {0:0}%", repairTargetCondition), GUILayout.Width(235f));
+            float newRepairTargetCondition = GUILayout.HorizontalSlider(repairTargetCondition, minimumSailCondition, 100f, GUILayout.Width(240f));
+            newRepairTargetCondition = Mathf.Round(newRepairTargetCondition);
+            if (Mathf.Abs(newRepairTargetCondition - repairTargetCondition) > 0.1f)
+            {
+                SetRepairTargetCondition(newRepairTargetCondition);
+            }
+            if (GUILayout.Button("90%", GUILayout.Width(55f)))
+            {
+                SetRepairTargetCondition(90f);
+            }
+            if (GUILayout.Button("95%", GUILayout.Width(55f)))
+            {
+                SetRepairTargetCondition(95f);
+            }
+            if (GUILayout.Button("100%", GUILayout.Width(55f)))
+            {
+                SetRepairTargetCondition(100f);
+            }
+            GUILayout.EndHorizontal();
+
             GUILayout.Space(6f);
             GUILayout.BeginHorizontal();
             GUILayout.Label("Auto", GUILayout.Width(45f));
@@ -226,7 +275,7 @@ namespace TransOcean2FleetAutomation.Direct
 
         private bool ControllersReady
         {
-            get { return dsqLite != null && shipFactory != null; }
+            get { return dsqLite != null && staticSqLite != null && shipFactory != null; }
         }
 
         private bool IsGameSessionActive()
@@ -245,7 +294,7 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             GUILayout.Label(TrimForUi("#" + ship.PlayerShipId + " " + ship.Name, 28), GUILayout.Width(205f));
-            GUILayout.Label(TrimForUi(ship.Status, 13), GUILayout.Width(95f));
+            GUILayout.Label(TrimForUi(GetDisplayStatus(ship), 13), GUILayout.Width(95f));
             GUILayout.Label(TrimForUi(ship.CurrentHarbor, 18), GUILayout.Width(145f));
             GUILayout.Label(TrimForUi(ship.DestinationHarbor, 18), GUILayout.Width(145f));
             GUILayout.Label(string.Format("{0:0}%", ship.Condition), GUILayout.Width(60f));
@@ -261,6 +310,7 @@ namespace TransOcean2FleetAutomation.Direct
         private void RefreshControllers()
         {
             dsqLite = FindController("Cargo.DynamicSQLiteController", "Database");
+            staticSqLite = FindController("Cargo.StaticSQLiteController", "Database");
             shipFactory = FindController("Cargo.ShipFactory", "ShipFactory");
 
             if (!ControllersReady)
@@ -273,10 +323,36 @@ namespace TransOcean2FleetAutomation.Direct
             getPlayerIdMethod = dsqLiteType.GetMethod("GetPlayerID", Type.EmptyTypes);
             getPlayerCreditsMethod = dsqLiteType.GetMethod("GetPlayerCredits", new Type[] { typeof(int) });
             getAllPlayerShipsMethod = dsqLiteType.GetMethod("GetALLPlayerShips", new Type[] { typeof(int) });
+            getPlayerShipMethod = dsqLiteType.GetMethod("GetPlayerShip", new Type[] { typeof(int) });
             updatePlayerShipAiStateMethod = dsqLiteType.GetMethod("UpdatePlayerShipAiState", new Type[] { typeof(int), typeof(bool) });
             getJobsFromStartHarborMethod = dsqLiteType.GetMethod(
                 "GetAllJobsFromStartHarbor",
                 new Type[] { typeof(string), typeof(string), typeof(int) });
+            Type staticSqLiteType = staticSqLite.GetType();
+            getHarborMethod = staticSqLiteType.GetMethod("GetHarbor", new Type[] { typeof(string) });
+            getRepairDockHarborsMethod = staticSqLiteType.GetMethod("GetRepairDockHarbors", Type.EmptyTypes);
+            getHarborDistanceMethod = staticSqLiteType.GetMethod("GetHarborDistance", new Type[] { typeof(string), typeof(string), typeof(int), typeof(bool) });
+            getRegionOfHarborMethod = staticSqLiteType.GetMethod("GetRegionOfHarbor", new Type[] { typeof(string) });
+            getShipClassesMethod = staticSqLiteType.GetMethod("GetShipClasses", new Type[] { typeof(int) });
+            Type playerShipsType = FindType("DynamicTablePlayerShips");
+            Type shipFactoryType = shipFactory.GetType();
+            if (playerShipsType != null)
+            {
+                repairPlayerShipMethod = shipFactoryType.GetMethod(
+                    "RepairPlayerShip",
+                    new Type[] { playerShipsType, typeof(int), typeof(long), typeof(float), typeof(bool), typeof(bool) });
+                getRemainingConditionOnArrivalMethod = shipFactoryType.GetMethod(
+                    "GetRemainingConditionOnArrival",
+                    new Type[] { playerShipsType, typeof(string), typeof(string) });
+            }
+            sendShipToDestinationMethod = shipFactoryType.GetMethod("SendShipToDestination", new Type[] { typeof(int), typeof(string) });
+            getShipSinkChanceMethod = shipFactoryType.GetMethod("GetShipSinkChance", new Type[] { typeof(int), typeof(float) });
+            getDaysForRepairMethod = shipFactoryType.GetMethod("GetDaysForRepair", new Type[] { typeof(float), typeof(int) });
+            Type timerType = FindType("Deck13HH.Timer");
+            if (timerType != null)
+            {
+                getCurrentDateTimeMethod = timerType.GetMethod("get_CurrentDateTime", BindingFlags.Public | BindingFlags.Static);
+            }
             cargoEventType = FindType("Deck13HH.EventManagement.CargoEventType");
             Type eventManagerType = FindType("Deck13HH.EventManagement.EventManager");
             if (eventManagerType != null && cargoEventType != null)
@@ -380,12 +456,26 @@ namespace TransOcean2FleetAutomation.Direct
 
             string prefix = string.Format("#{0} {1}: ", ship.PlayerShipId, ship.Name);
 
+            if (IsRepairPending(ship))
+            {
+                SetNativeAiState(ship, false);
+                AddDecisionLog(prefix + "repair is already in progress; keeping automation on hold.");
+                return;
+            }
+
             if (!IsShipIdleInHarbor(ship))
             {
                 if (liveActions && ship.Condition < minimumSailCondition)
                 {
                     SetNativeAiState(ship, false);
-                    AddDecisionLog(prefix + string.Format("manual safety hold armed while away/working; condition {0:0}% is below sail minimum {1:0}%.", ship.Condition, minimumSailCondition));
+                    if (IsHeadingToRepairDock(ship))
+                    {
+                        AddDecisionLog(prefix + string.Format("heading to repair dock at {0}; condition {1:0}% is below sail minimum {2:0}%.", ship.DestinationHarbor, ship.Condition, minimumSailCondition));
+                    }
+                    else
+                    {
+                        AddDecisionLog(prefix + string.Format("manual safety hold armed while away/working; condition {0:0}% is below sail minimum {1:0}%.", ship.Condition, minimumSailCondition));
+                    }
                 }
                 else
                 {
@@ -398,7 +488,11 @@ namespace TransOcean2FleetAutomation.Direct
             if (ship.Condition < minimumSailCondition)
             {
                 SetNativeAiState(ship, false);
-                if (playerCredits > reserve)
+                if (liveActions && autoRepairs)
+                {
+                    TryHandleRepairNeed(ship, prefix, reserve);
+                }
+                else if (playerCredits > reserve)
                 {
                     AddDecisionLog(prefix + string.Format("held for maintenance: {0:0}% condition is below sail minimum {1:0}%. Repair before automation sends it out.", ship.Condition, minimumSailCondition));
                 }
@@ -443,6 +537,380 @@ namespace TransOcean2FleetAutomation.Direct
             {
                 AddDecisionLog(prefix + "live actions are OFF; recommendation only.");
             }
+        }
+
+        private void TryHandleRepairNeed(ShipSnapshot ship, string prefix, long reserve)
+        {
+            if (IsHarborRepairDock(ship.CurrentHarbor))
+            {
+                TryStartRepair(ship, prefix, reserve);
+                return;
+            }
+
+            TrySendToRepairDock(ship, prefix);
+        }
+
+        private bool TryStartRepair(ShipSnapshot ship, string prefix, long reserve)
+        {
+            RepairPlan plan = BuildRepairPlan(ship, reserve);
+            if (!plan.CanStart)
+            {
+                AddDecisionLog(prefix + plan.Message);
+                return false;
+            }
+
+            object rawShip = GetLatestRawShip(ship);
+            if (rawShip == null)
+            {
+                AddDecisionLog(prefix + "repair deferred; native ship record is unavailable.");
+                return false;
+            }
+
+            try
+            {
+                repairPlayerShipMethod.Invoke(
+                    shipFactory,
+                    new object[] { rawShip, plan.Region, plan.RepairDockBasePrice, plan.TargetCondition, false, false });
+                ship.Condition = plan.TargetCondition;
+                ship.Repaired = false;
+                ship.RepairFinish = GetCurrentGameDateTime().AddDays(plan.RepairDays);
+                SendCargoEvent("SHIP_WILL_NOW_REPAIRED", ship.PlayerShipId);
+
+                string belowMinimumNote = plan.TargetCondition < minimumSailCondition
+                    ? " It will remain held below the sail minimum."
+                    : string.Empty;
+                AddDecisionLog(prefix + string.Format(
+                    "repair started at {0}: {1:0}% -> {2:0}% for about {3:n0} credits, {4} day(s).{5}",
+                    ship.CurrentHarbor,
+                    plan.StartCondition,
+                    plan.TargetCondition,
+                    plan.EstimatedGrossCost,
+                    plan.RepairDays,
+                    belowMinimumNote));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(prefix + "repair start failed: " + UnwrapMessage(ex));
+                return false;
+            }
+        }
+
+        private RepairPlan BuildRepairPlan(ShipSnapshot ship, long reserve)
+        {
+            RepairPlan plan = new RepairPlan();
+            plan.StartCondition = ship.Condition;
+
+            if (repairPlayerShipMethod == null || getHarborMethod == null || getRegionOfHarborMethod == null || getShipClassesMethod == null)
+            {
+                plan.Message = "repair deferred; native repair bridge is unavailable.";
+                return plan;
+            }
+
+            object harbor = GetHarbor(ship.CurrentHarbor);
+            if (harbor == null || !ReadBool(harbor, "RepairDock"))
+            {
+                plan.Message = "held for maintenance; " + ship.CurrentHarbor + " has no repair dock.";
+                return plan;
+            }
+
+            long repairDockBasePrice = ReadLong(harbor, "RepairDockBasePrice");
+            if (repairDockBasePrice <= 0L)
+            {
+                plan.Message = "repair deferred; repair dock price is unavailable at " + ship.CurrentHarbor + ".";
+                return plan;
+            }
+
+            object shipClass = null;
+            try
+            {
+                shipClass = getShipClassesMethod.Invoke(staticSqLite, new object[] { ship.Class });
+            }
+            catch (Exception ex)
+            {
+                plan.Message = "repair price lookup failed: " + UnwrapMessage(ex);
+                return plan;
+            }
+
+            float repairBaseFactor = ReadFloat(shipClass, "RepairBaseFactor");
+            if (repairBaseFactor <= 0f)
+            {
+                plan.Message = "repair deferred; class repair factor is unavailable.";
+                return plan;
+            }
+
+            long grossPricePerPercent = (long)((double)repairDockBasePrice * (double)repairBaseFactor);
+            if (grossPricePerPercent <= 0L)
+            {
+                plan.Message = "repair deferred; repair price is unavailable.";
+                return plan;
+            }
+
+            float desiredTarget = Mathf.Clamp(repairTargetCondition, minimumSailCondition, 100f);
+            long spendable = playerCredits - reserve;
+            if (spendable < 0L)
+            {
+                spendable = 0L;
+            }
+
+            float chosenTarget = desiredTarget;
+            long desiredCost = EstimateRepairCost(ship.Condition, desiredTarget, grossPricePerPercent);
+            if (desiredCost > spendable)
+            {
+                long affordablePercent = spendable / grossPricePerPercent;
+                if (affordablePercent <= 0L)
+                {
+                    plan.Message = string.Format(
+                        "held for maintenance; estimated repair to {0:0}% costs {1:n0}, spendable after reserve is {2:n0}.",
+                        desiredTarget,
+                        desiredCost,
+                        spendable);
+                    return plan;
+                }
+
+                chosenTarget = Mathf.Min(desiredTarget, ship.Condition + affordablePercent);
+            }
+
+            if (chosenTarget <= ship.Condition)
+            {
+                plan.Message = "repair skipped; target condition is not above current condition.";
+                return plan;
+            }
+
+            try
+            {
+                plan.Region = ToInt(getRegionOfHarborMethod.Invoke(staticSqLite, new object[] { ship.CurrentHarbor }));
+            }
+            catch (Exception ex)
+            {
+                plan.Message = "repair region lookup failed: " + UnwrapMessage(ex);
+                return plan;
+            }
+
+            plan.RepairDockBasePrice = repairDockBasePrice;
+            plan.TargetCondition = Mathf.Clamp(chosenTarget, ship.Condition, 100f);
+            plan.EstimatedGrossCost = EstimateRepairCost(ship.Condition, plan.TargetCondition, grossPricePerPercent);
+            plan.RepairDays = GetRepairDays(plan.TargetCondition - ship.Condition, ship.PlayerShipId);
+            plan.CanStart = true;
+            return plan;
+        }
+
+        private bool TrySendToRepairDock(ShipSnapshot ship, string prefix)
+        {
+            if (sendShipToDestinationMethod == null)
+            {
+                AddDecisionLog(prefix + "held for maintenance; native movement bridge is unavailable.");
+                return false;
+            }
+
+            RepairDockCandidate destination = FindBestRepairDock(ship);
+            if (destination == null)
+            {
+                AddDecisionLog(prefix + "held for maintenance; no safe reachable repair dock found.");
+                return false;
+            }
+
+            try
+            {
+                sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, destination.Harbor });
+                ship.DestinationHarbor = destination.Harbor;
+                AddDecisionLog(prefix + string.Format(
+                    "routing to repair dock at {0} ({1:0} distance units, arrival condition about {2:0}%) before taking more work.",
+                    destination.Harbor,
+                    destination.Distance,
+                    destination.ArrivalCondition));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(prefix + "failed to route to repair dock: " + UnwrapMessage(ex));
+                return false;
+            }
+        }
+
+        private RepairDockCandidate FindBestRepairDock(ShipSnapshot ship)
+        {
+            if (getRepairDockHarborsMethod == null || getHarborDistanceMethod == null)
+            {
+                return null;
+            }
+
+            IEnumerable harbors = null;
+            try
+            {
+                harbors = getRepairDockHarborsMethod.Invoke(staticSqLite, null) as IEnumerable;
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (harbors == null)
+            {
+                return null;
+            }
+
+            bool hasWaypointUpgrade = HasWaypointUpgrade(ship);
+            object rawShip = GetLatestRawShip(ship);
+            RepairDockCandidate best = null;
+            foreach (object harbor in harbors)
+            {
+                string city = ReadString(harbor, "City");
+                if (string.IsNullOrEmpty(city) || city == ship.CurrentHarbor)
+                {
+                    continue;
+                }
+
+                int harborClass = ReadInt(harbor, "HarborClass");
+                if (harborClass > 0 && ship.Class > harborClass)
+                {
+                    continue;
+                }
+
+                float distance = 0f;
+                try
+                {
+                    distance = Convert.ToSingle(getHarborDistanceMethod.Invoke(staticSqLite, new object[] { ship.CurrentHarbor, city, ship.Class, hasWaypointUpgrade }));
+                }
+                catch
+                {
+                    distance = 0f;
+                }
+
+                if (distance <= 0f)
+                {
+                    continue;
+                }
+
+                float arrivalCondition = GetRemainingConditionOnArrival(rawShip, ship, city);
+                int sinkChance = GetShipSinkChance(arrivalCondition);
+                if (sinkChance > 0)
+                {
+                    continue;
+                }
+
+                if (best == null || distance < best.Distance)
+                {
+                    best = new RepairDockCandidate();
+                    best.Harbor = city;
+                    best.Distance = distance;
+                    best.ArrivalCondition = arrivalCondition;
+                }
+            }
+
+            return best;
+        }
+
+        private bool IsHarborRepairDock(string harborName)
+        {
+            object harbor = GetHarbor(harborName);
+            return harbor != null && ReadBool(harbor, "RepairDock");
+        }
+
+        private bool IsHeadingToRepairDock(ShipSnapshot ship)
+        {
+            return ship != null
+                && !string.IsNullOrEmpty(ship.DestinationHarbor)
+                && ship.DestinationHarbor != ship.CurrentHarbor
+                && IsHarborRepairDock(ship.DestinationHarbor);
+        }
+
+        private object GetHarbor(string harborName)
+        {
+            if (getHarborMethod == null || string.IsNullOrEmpty(harborName) || harborName == "None")
+            {
+                return null;
+            }
+
+            try
+            {
+                return getHarborMethod.Invoke(staticSqLite, new object[] { harborName });
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private float GetRemainingConditionOnArrival(object rawShip, ShipSnapshot ship, string destinationHarbor)
+        {
+            if (getRemainingConditionOnArrivalMethod != null && rawShip != null)
+            {
+                try
+                {
+                    return Convert.ToSingle(getRemainingConditionOnArrivalMethod.Invoke(
+                        shipFactory,
+                        new object[] { rawShip, ship.CurrentHarbor, destinationHarbor }));
+                }
+                catch
+                {
+                }
+            }
+
+            return ship.Condition;
+        }
+
+        private int GetShipSinkChance(float condition)
+        {
+            if (getShipSinkChanceMethod != null)
+            {
+                try
+                {
+                    return ToInt(getShipSinkChanceMethod.Invoke(shipFactory, new object[] { playerId, condition }));
+                }
+                catch
+                {
+                }
+            }
+
+            return condition <= 0f ? 100 : 0;
+        }
+
+        private static long EstimateRepairCost(float startCondition, float targetCondition, long pricePerPercent)
+        {
+            float delta = Mathf.Max(0f, targetCondition - startCondition);
+            return ((long)delta) * pricePerPercent;
+        }
+
+        private int GetRepairDays(float conditionToRepair, int playerShipId)
+        {
+            if (getDaysForRepairMethod != null)
+            {
+                try
+                {
+                    return Math.Max(0, ToInt(getDaysForRepairMethod.Invoke(shipFactory, new object[] { conditionToRepair, playerShipId })));
+                }
+                catch
+                {
+                }
+            }
+
+            return 1 + (int)(conditionToRepair / 7f);
+        }
+
+        private object GetLatestRawShip(ShipSnapshot ship)
+        {
+            if (getPlayerShipMethod != null)
+            {
+                try
+                {
+                    object rawShip = getPlayerShipMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId });
+                    if (rawShip != null)
+                    {
+                        return rawShip;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return ship.RawShip;
+        }
+
+        private static bool HasWaypointUpgrade(ShipSnapshot ship)
+        {
+            return ship.Upgrade3 == 5 && (ship.Class == 3 || ship.Class == 4);
         }
 
         private JobCandidate FindBestJob(ShipSnapshot ship)
@@ -491,6 +959,11 @@ namespace TransOcean2FleetAutomation.Direct
 
         private bool IsShipIdleInHarbor(ShipSnapshot ship)
         {
+            if (IsRepairPending(ship))
+            {
+                return false;
+            }
+
             if (string.IsNullOrEmpty(ship.CurrentHarbor))
             {
                 return false;
@@ -511,6 +984,56 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return true;
+        }
+
+        private bool IsRepairPending(ShipSnapshot ship)
+        {
+            if (ship == null || ship.Repaired)
+            {
+                return false;
+            }
+
+            if (ship.RepairFinish <= DateTime.MinValue.AddDays(1.0))
+            {
+                return false;
+            }
+
+            return ship.RepairFinish > GetCurrentGameDateTime();
+        }
+
+        private DateTime GetCurrentGameDateTime()
+        {
+            if (getCurrentDateTimeMethod != null)
+            {
+                try
+                {
+                    object value = getCurrentDateTimeMethod.Invoke(null, null);
+                    if (value is DateTime)
+                    {
+                        return (DateTime)value;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return DateTime.Now;
+        }
+
+        private string GetDisplayStatus(ShipSnapshot ship)
+        {
+            if (IsRepairPending(ship))
+            {
+                return "Repairing";
+            }
+
+            if (IsHeadingToRepairDock(ship))
+            {
+                return "To repair";
+            }
+
+            return ship.Status;
         }
 
         private void SetAllVisibleShips(bool enabled)
@@ -536,7 +1059,16 @@ namespace TransOcean2FleetAutomation.Direct
                     else if (ships[i].Condition < minimumSailCondition)
                     {
                         SetNativeAiState(ships[i], false);
-                        AddDecisionLog(string.Format("#{0} {1}: held for maintenance; condition {2:0}% is below sail minimum {3:0}%.", ships[i].PlayerShipId, ships[i].Name, ships[i].Condition, minimumSailCondition));
+                        string prefix = string.Format("#{0} {1}: ", ships[i].PlayerShipId, ships[i].Name);
+                        if (autoRepairs)
+                        {
+                            long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
+                            TryHandleRepairNeed(ships[i], prefix, reserve);
+                        }
+                        else
+                        {
+                            AddDecisionLog(prefix + string.Format("held for maintenance; condition {0:0}% is below sail minimum {1:0}%.", ships[i].Condition, minimumSailCondition));
+                        }
                     }
                     else
                     {
@@ -554,8 +1086,21 @@ namespace TransOcean2FleetAutomation.Direct
         {
             minimumSailCondition = Mathf.Clamp(value, 50f, 100f);
             PlayerPrefs.SetFloat("TO2FA.MinimumSailCondition", minimumSailCondition);
+            if (repairTargetCondition < minimumSailCondition)
+            {
+                repairTargetCondition = minimumSailCondition;
+                PlayerPrefs.SetFloat("TO2FA.RepairTargetCondition", repairTargetCondition);
+            }
             PlayerPrefs.Save();
             AddDecisionLog(string.Format("Minimum condition to sail set to {0:0}%.", minimumSailCondition));
+        }
+
+        private void SetRepairTargetCondition(float value)
+        {
+            repairTargetCondition = Mathf.Clamp(value, minimumSailCondition, 100f);
+            PlayerPrefs.SetFloat("TO2FA.RepairTargetCondition", repairTargetCondition);
+            PlayerPrefs.Save();
+            AddDecisionLog(string.Format("Repair target condition set to {0:0}%.", repairTargetCondition));
         }
 
         private ShipSnapshot FindShipSnapshot(int playerShipId)
@@ -595,22 +1140,32 @@ namespace TransOcean2FleetAutomation.Direct
 
         private bool TriggerNativeAiCastOut(ShipSnapshot ship, string reason)
         {
+            if (SendCargoEvent("SHIP_CAST_IN_DONE", ship.PlayerShipId))
+            {
+                AddDecisionLog(string.Format("#{0} {1}: native AI triggered from {2}.", ship.PlayerShipId, ship.Name, reason));
+                return true;
+            }
+
+            AddDecisionLog(string.Format("#{0} {1}: failed to trigger native AI.", ship.PlayerShipId, ship.Name));
+            return false;
+        }
+
+        private bool SendCargoEvent(string eventName, object payload)
+        {
             if (sendEventMethod == null || cargoEventType == null)
             {
-                AddDecisionLog(string.Format("#{0} {1}: native event bridge is unavailable.", ship.PlayerShipId, ship.Name));
                 return false;
             }
 
             try
             {
-                object eventValue = Enum.Parse(cargoEventType, "SHIP_CAST_IN_DONE");
-                sendEventMethod.Invoke(null, new object[] { this, eventValue, ship.PlayerShipId });
-                AddDecisionLog(string.Format("#{0} {1}: native AI triggered from {2}.", ship.PlayerShipId, ship.Name, reason));
+                object eventValue = Enum.Parse(cargoEventType, eventName);
+                sendEventMethod.Invoke(null, new object[] { this, eventValue, payload });
                 return true;
             }
             catch (Exception ex)
             {
-                AddDecisionLog(string.Format("#{0} {1}: failed to trigger native AI: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
+                AddDecisionLog("Failed to send native event " + eventName + ": " + UnwrapMessage(ex));
                 return false;
             }
         }
@@ -830,6 +1385,24 @@ namespace TransOcean2FleetAutomation.Direct
             }
         }
 
+        private static DateTime ReadDateTime(object instance, string fieldName)
+        {
+            object value = ReadField(instance, fieldName);
+            if (value == null)
+            {
+                return DateTime.MinValue;
+            }
+
+            try
+            {
+                return Convert.ToDateTime(value);
+            }
+            catch
+            {
+                return DateTime.MinValue;
+            }
+        }
+
         private static int ToInt(object value)
         {
             if (value == null)
@@ -878,6 +1451,9 @@ namespace TransOcean2FleetAutomation.Direct
             public string DestinationHarbor;
             public string Status;
             public bool IsAI;
+            public DateTime RepairFinish;
+            public bool Repaired;
+            public int Upgrade3;
             public object RawShip;
 
             public static ShipSnapshot From(object rawShip)
@@ -896,8 +1472,30 @@ namespace TransOcean2FleetAutomation.Direct
                 snapshot.DestinationHarbor = ReadString(rawShip, "DestinationHarbor");
                 snapshot.Status = ReadString(rawShip, "Status");
                 snapshot.IsAI = ReadBool(rawShip, "IsAI");
+                snapshot.RepairFinish = ReadDateTime(rawShip, "RepairFinish");
+                snapshot.Repaired = ReadBool(rawShip, "Repaired");
+                snapshot.Upgrade3 = ReadInt(rawShip, "Upgrade3");
                 return snapshot;
             }
+        }
+
+        private sealed class RepairPlan
+        {
+            public bool CanStart;
+            public string Message;
+            public float StartCondition;
+            public float TargetCondition;
+            public int Region;
+            public long RepairDockBasePrice;
+            public long EstimatedGrossCost;
+            public int RepairDays;
+        }
+
+        private sealed class RepairDockCandidate
+        {
+            public string Harbor;
+            public float Distance;
+            public float ArrivalCondition;
         }
 
         private sealed class JobCandidate

@@ -22,9 +22,10 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Supports ship-by-ship opt-in toggles.
 - Evaluates enabled ships every 30 seconds.
 - Live actions can flip opted-in player ships into the game's native `IsAI` ship state and trigger the built-in AI cast-out path when a ship is idle in harbor.
-- Holds enabled ships below the configured minimum condition-to-sail threshold instead of sending them back out.
+- Holds enabled ships below the configured minimum condition-to-sail threshold instead of sending them back out for normal jobs.
+- Auto repairs can send low-condition ships to the nearest safe reachable repair dock, then start the game's native repair flow when the ship is in a repair-capable harbor.
 - Scores available jobs from each idle ship's current harbor using payment per travel day, relationship points, and penalty risk.
-- Flags low-condition ships for repair consideration using a simple treasury reserve check.
+- Uses a simple treasury reserve check before starting automated repairs.
 - Press `F8` in-game to run enabled ships.
 - Press `F9` in-game to show or hide the panel.
 - Press `F10` in-game to refresh the visible fleet list.
@@ -85,4 +86,4 @@ Only enable the loader for controlled smoke tests right now.
 
 ## Safety notes
 
-The current direct mod can perform live actions when the panel's `Live actions` toggle is on. It uses the game's own player-ship AI state and ship cast-out event path, so enabled ships may accept work, depart, refuel, repair, upgrade, and spend credits according to the base-game AI logic. The mod adds an extra minimum condition-to-sail gate, defaulting to 85%, before it triggers a departure. Turning `Live actions` off restores manual AI state for currently enabled ships. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
+The current direct mod can perform live actions when the panel's `Live actions` toggle is on. It uses the game's own player-ship AI state, ship cast-out event path, direct destination routing, and repair methods, so enabled ships may accept work, depart, refuel, repair, upgrade, and spend credits according to the base-game AI logic. The mod adds an extra minimum condition-to-sail gate, defaulting to 85%, before it triggers a normal job departure. Below that gate, auto repairs can route ships to a repair dock only when the game reports zero sink chance on arrival, then start repair up to the configured repair target when treasury reserves allow. Turning `Live actions` off restores manual AI state for currently enabled ships. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
