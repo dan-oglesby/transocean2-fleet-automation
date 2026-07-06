@@ -49,6 +49,7 @@ namespace TransOcean2FleetAutomation.Direct
         private bool liveActions = true;
         private bool evaluateEnabledShipsEveryTick = true;
         private bool gameSessionActive;
+        private float minimumSailCondition = 85f;
         private float nextControllerLookup;
         private float nextRefresh;
         private float nextAutomationTick;
@@ -64,6 +65,8 @@ namespace TransOcean2FleetAutomation.Direct
             showPanel = PlayerPrefs.GetInt("TO2FA.ShowPanel", 1) == 1;
             liveActions = PlayerPrefs.GetInt("TO2FA.LiveActions", 1) == 1;
             evaluateEnabledShipsEveryTick = PlayerPrefs.GetInt("TO2FA.TickEnabled", 1) == 1;
+            minimumSailCondition = PlayerPrefs.GetFloat("TO2FA.MinimumSailCondition", 85f);
+            minimumSailCondition = Mathf.Clamp(minimumSailCondition, 50f, 100f);
             AddDecisionLog("Captain UI attached. Live actions are " + (liveActions ? "ON." : "OFF."));
         }
 
@@ -162,6 +165,31 @@ namespace TransOcean2FleetAutomation.Direct
             if (GUILayout.Button("Disable all", GUILayout.Width(105f)))
             {
                 SetAllVisibleShips(false);
+            }
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(string.Format("Minimum condition to sail: {0:0}%", minimumSailCondition), GUILayout.Width(235f));
+            float newMinimumSailCondition = GUILayout.HorizontalSlider(minimumSailCondition, 50f, 100f, GUILayout.Width(240f));
+            newMinimumSailCondition = Mathf.Round(newMinimumSailCondition);
+            if (Mathf.Abs(newMinimumSailCondition - minimumSailCondition) > 0.1f)
+            {
+                minimumSailCondition = newMinimumSailCondition;
+                PlayerPrefs.SetFloat("TO2FA.MinimumSailCondition", minimumSailCondition);
+                PlayerPrefs.Save();
+                AddDecisionLog(string.Format("Minimum condition to sail set to {0:0}%.", minimumSailCondition));
+            }
+            if (GUILayout.Button("85%", GUILayout.Width(55f)))
+            {
+                SetMinimumSailCondition(85f);
+            }
+            if (GUILayout.Button("90%", GUILayout.Width(55f)))
+            {
+                SetMinimumSailCondition(90f);
+            }
+            if (GUILayout.Button("95%", GUILayout.Width(55f)))
+            {
+                SetMinimumSailCondition(95f);
             }
             GUILayout.EndHorizontal();
 
@@ -352,32 +380,43 @@ namespace TransOcean2FleetAutomation.Direct
 
             string prefix = string.Format("#{0} {1}: ", ship.PlayerShipId, ship.Name);
 
+            if (!IsShipIdleInHarbor(ship))
+            {
+                if (liveActions && ship.Condition < minimumSailCondition)
+                {
+                    SetNativeAiState(ship, false);
+                    AddDecisionLog(prefix + string.Format("manual safety hold armed while away/working; condition {0:0}% is below sail minimum {1:0}%.", ship.Condition, minimumSailCondition));
+                }
+                else
+                {
+                    AddDecisionLog(prefix + (liveActions ? "native AI armed; waiting because ship is not idle in a harbor." : "waiting; ship is not idle in a harbor."));
+                }
+                return;
+            }
+
+            long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
+            if (ship.Condition < minimumSailCondition)
+            {
+                SetNativeAiState(ship, false);
+                if (playerCredits > reserve)
+                {
+                    AddDecisionLog(prefix + string.Format("held for maintenance: {0:0}% condition is below sail minimum {1:0}%. Repair before automation sends it out.", ship.Condition, minimumSailCondition));
+                }
+                else
+                {
+                    AddDecisionLog(prefix + string.Format("held for maintenance: {0:0}% condition is below sail minimum {1:0}%, but treasury is near reserve {2:n0}.", ship.Condition, minimumSailCondition, reserve));
+                }
+                return;
+            }
+
             if (liveActions)
             {
                 SetNativeAiState(ship, true);
             }
 
-            if (!IsShipIdleInHarbor(ship))
+            if (ship.Condition < minimumSailCondition + 5f && playerCredits > reserve * 2L)
             {
-                AddDecisionLog(prefix + (liveActions ? "native AI armed; waiting because ship is not idle in a harbor." : "waiting; ship is not idle in a harbor."));
-                return;
-            }
-
-            long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
-            if (ship.Condition < 55f)
-            {
-                if (playerCredits > reserve)
-                {
-                    AddDecisionLog(prefix + string.Format("repair is priority ({0:0}% condition, reserve {1:n0}).", ship.Condition, reserve));
-                }
-                else
-                {
-                    AddDecisionLog(prefix + string.Format("condition is low ({0:0}%) but treasury is below reserve; defer non-emergency repair.", ship.Condition));
-                }
-            }
-            else if (ship.Condition < 70f && playerCredits > reserve * 2L)
-            {
-                AddDecisionLog(prefix + string.Format("repair soon if route options are weak ({0:0}% condition).", ship.Condition));
+                AddDecisionLog(prefix + string.Format("maintenance soon: condition {0:0}% is close to sail minimum {1:0}%.", ship.Condition, minimumSailCondition));
             }
 
             JobCandidate bestJob = FindBestJob(ship);
@@ -490,13 +529,33 @@ namespace TransOcean2FleetAutomation.Direct
             {
                 if (IsCaptainEnabled(ships[i].PlayerShipId))
                 {
-                    SetNativeAiState(ships[i], nativeAiEnabled);
-                    if (nativeAiEnabled && IsShipIdleInHarbor(ships[i]))
+                    if (!nativeAiEnabled)
                     {
-                        TriggerNativeAiCastOut(ships[i], "live actions toggled on");
+                        SetNativeAiState(ships[i], false);
+                    }
+                    else if (ships[i].Condition < minimumSailCondition)
+                    {
+                        SetNativeAiState(ships[i], false);
+                        AddDecisionLog(string.Format("#{0} {1}: held for maintenance; condition {2:0}% is below sail minimum {3:0}%.", ships[i].PlayerShipId, ships[i].Name, ships[i].Condition, minimumSailCondition));
+                    }
+                    else
+                    {
+                        SetNativeAiState(ships[i], true);
+                        if (IsShipIdleInHarbor(ships[i]))
+                        {
+                            TriggerNativeAiCastOut(ships[i], "live actions toggled on");
+                        }
                     }
                 }
             }
+        }
+
+        private void SetMinimumSailCondition(float value)
+        {
+            minimumSailCondition = Mathf.Clamp(value, 50f, 100f);
+            PlayerPrefs.SetFloat("TO2FA.MinimumSailCondition", minimumSailCondition);
+            PlayerPrefs.Save();
+            AddDecisionLog(string.Format("Minimum condition to sail set to {0:0}%.", minimumSailCondition));
         }
 
         private ShipSnapshot FindShipSnapshot(int playerShipId)

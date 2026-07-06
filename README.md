@@ -22,6 +22,7 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Supports ship-by-ship opt-in toggles.
 - Evaluates enabled ships every 30 seconds.
 - Live actions can flip opted-in player ships into the game's native `IsAI` ship state and trigger the built-in AI cast-out path when a ship is idle in harbor.
+- Holds enabled ships below the configured minimum condition-to-sail threshold instead of sending them back out.
 - Scores available jobs from each idle ship's current harbor using payment per travel day, relationship points, and penalty risk.
 - Flags low-condition ships for repair consideration using a simple treasury reserve check.
 - Press `F8` in-game to run enabled ships.
@@ -84,4 +85,4 @@ Only enable the loader for controlled smoke tests right now.
 
 ## Safety notes
 
-The current direct mod can perform live actions when the panel's `Live actions` toggle is on. It uses the game's own player-ship AI state and ship cast-out event path, so enabled ships may accept work, depart, refuel, repair, upgrade, and spend credits according to the base-game AI logic. Turning `Live actions` off restores manual AI state for currently enabled ships. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
+The current direct mod can perform live actions when the panel's `Live actions` toggle is on. It uses the game's own player-ship AI state and ship cast-out event path, so enabled ships may accept work, depart, refuel, repair, upgrade, and spend credits according to the base-game AI logic. The mod adds an extra minimum condition-to-sail gate, defaulting to 85%, before it triggers a departure. Turning `Live actions` off restores manual AI state for currently enabled ships. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
