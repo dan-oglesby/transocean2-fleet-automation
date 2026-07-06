@@ -31,7 +31,15 @@ namespace TransOcean2FleetAutomation.Direct
         private const string LogPrefix = "[TO2FA.Direct]";
         private const string CaptainPrefsPrefix = "TO2FA.Captain.";
 
+        private static readonly string[] KnownContrabandFreights = new string[]
+        {
+            "ContaminatedWater",
+            "CounterfeitGoods",
+            "QuestionableGoods"
+        };
+
         private readonly Dictionary<int, bool> captainEnabledByShipId = new Dictionary<int, bool>();
+        private readonly Dictionary<string, bool> contrabandFreightByName = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private readonly List<ShipSnapshot> ships = new List<ShipSnapshot>();
         private readonly List<string> decisionLog = new List<string>();
 
@@ -44,10 +52,15 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getPlayerShipMethod;
         private MethodInfo getJobsFromStartHarborMethod;
         private MethodInfo getHarborMethod;
+        private MethodInfo getFreightAttributesMethod;
         private MethodInfo getRepairDockHarborsMethod;
         private MethodInfo getHarborDistanceMethod;
         private MethodInfo getRegionOfHarborMethod;
         private MethodInfo getShipClassesMethod;
+        private MethodInfo updateJobPlayerShipMethod;
+        private MethodInfo setShipDontLoadJobsMethod;
+        private MethodInfo setShipGlobalDestinationMethod;
+        private MethodInfo setShipSmugglersWareMethod;
         private MethodInfo repairPlayerShipMethod;
         private MethodInfo sendShipToDestinationMethod;
         private MethodInfo getRemainingConditionOnArrivalMethod;
@@ -62,6 +75,7 @@ namespace TransOcean2FleetAutomation.Direct
         private bool liveActions = true;
         private bool autoRepairs = true;
         private bool evaluateEnabledShipsEveryTick = true;
+        private bool allowContrabandCargo;
         private bool gameSessionActive;
         private float minimumSailCondition = 85f;
         private float repairTargetCondition = 100f;
@@ -81,11 +95,13 @@ namespace TransOcean2FleetAutomation.Direct
             liveActions = PlayerPrefs.GetInt("TO2FA.LiveActions", 1) == 1;
             autoRepairs = PlayerPrefs.GetInt("TO2FA.AutoRepairs", 1) == 1;
             evaluateEnabledShipsEveryTick = PlayerPrefs.GetInt("TO2FA.TickEnabled", 1) == 1;
+            allowContrabandCargo = PlayerPrefs.GetInt("TO2FA.AllowContrabandCargo", 0) == 1;
             minimumSailCondition = PlayerPrefs.GetFloat("TO2FA.MinimumSailCondition", 85f);
             minimumSailCondition = Mathf.Clamp(minimumSailCondition, 50f, 100f);
             repairTargetCondition = PlayerPrefs.GetFloat("TO2FA.RepairTargetCondition", 100f);
             repairTargetCondition = Mathf.Clamp(repairTargetCondition, minimumSailCondition, 100f);
-            AddDecisionLog("Captain UI attached. Live actions are " + (liveActions ? "ON." : "OFF."));
+            SeedKnownContrabandFreights();
+            AddDecisionLog("Captain UI attached. Live actions are " + (liveActions ? "ON." : "OFF.") + " Cargo policy: " + GetCargoPolicyLabel() + ".");
         }
 
         private void Update()
@@ -164,6 +180,19 @@ namespace TransOcean2FleetAutomation.Direct
                 PlayerPrefs.SetInt("TO2FA.AutoRepairs", autoRepairs ? 1 : 0);
                 PlayerPrefs.Save();
                 AddDecisionLog("Auto repairs " + (autoRepairs ? "enabled." : "disabled."));
+            }
+
+            bool newAllowContrabandCargo = GUILayout.Toggle(allowContrabandCargo, "Allow contraband", GUILayout.Width(145f));
+            if (newAllowContrabandCargo != allowContrabandCargo)
+            {
+                allowContrabandCargo = newAllowContrabandCargo;
+                PlayerPrefs.SetInt("TO2FA.AllowContrabandCargo", allowContrabandCargo ? 1 : 0);
+                PlayerPrefs.Save();
+                AddDecisionLog("Cargo policy changed: " + GetCargoPolicyLabel() + ".");
+                if (liveActions)
+                {
+                    SyncNativeAiStateForEnabledShips(true);
+                }
             }
 
             bool newTick = GUILayout.Toggle(evaluateEnabledShipsEveryTick, "Evaluate every 30s", GUILayout.Width(180f));
@@ -325,11 +354,16 @@ namespace TransOcean2FleetAutomation.Direct
             getAllPlayerShipsMethod = dsqLiteType.GetMethod("GetALLPlayerShips", new Type[] { typeof(int) });
             getPlayerShipMethod = dsqLiteType.GetMethod("GetPlayerShip", new Type[] { typeof(int) });
             updatePlayerShipAiStateMethod = dsqLiteType.GetMethod("UpdatePlayerShipAiState", new Type[] { typeof(int), typeof(bool) });
+            updateJobPlayerShipMethod = dsqLiteType.GetMethod("UpdatePlayerShipIDFromJob", new Type[] { typeof(int), typeof(int) });
+            setShipDontLoadJobsMethod = dsqLiteType.GetMethod("SetPlayerShipAIStateDontLoadJobs", new Type[] { typeof(int), typeof(bool) });
+            setShipGlobalDestinationMethod = dsqLiteType.GetMethod("SetPlayerShipAIStateGlobalDestination", new Type[] { typeof(int), typeof(string) });
+            setShipSmugglersWareMethod = dsqLiteType.GetMethod("SetShipSmugglersWare", new Type[] { typeof(int), typeof(bool) });
             getJobsFromStartHarborMethod = dsqLiteType.GetMethod(
                 "GetAllJobsFromStartHarbor",
                 new Type[] { typeof(string), typeof(string), typeof(int) });
             Type staticSqLiteType = staticSqLite.GetType();
             getHarborMethod = staticSqLiteType.GetMethod("GetHarbor", new Type[] { typeof(string) });
+            getFreightAttributesMethod = staticSqLiteType.GetMethod("GetFreightAttributes", Type.EmptyTypes);
             getRepairDockHarborsMethod = staticSqLiteType.GetMethod("GetRepairDockHarbors", Type.EmptyTypes);
             getHarborDistanceMethod = staticSqLiteType.GetMethod("GetHarborDistance", new Type[] { typeof(string), typeof(string), typeof(int), typeof(bool) });
             getRegionOfHarborMethod = staticSqLiteType.GetMethod("GetRegionOfHarbor", new Type[] { typeof(string) });
@@ -367,6 +401,7 @@ namespace TransOcean2FleetAutomation.Direct
 
             statusText = "Controllers ready. Toggle ships into TO2 Captain mode.";
             Debug.Log(LogPrefix + " Controllers ready for fleet automation.");
+            RefreshContrabandFreightCache();
             RefreshFleet(true);
         }
 
@@ -486,25 +521,41 @@ namespace TransOcean2FleetAutomation.Direct
                 AddDecisionLog(prefix + string.Format("maintenance soon: condition {0:0}% is close to sail minimum {1:0}%.", ship.Condition, minimumSailCondition));
             }
 
-            JobCandidate bestJob = FindBestJob(ship);
-            if (bestJob == null)
+            JobPlan bestPlan = FindBestJobPlan(ship);
+            if (bestPlan == null)
             {
-                AddDecisionLog(prefix + "no matching unreserved jobs found at " + ship.CurrentHarbor + ".");
+                AddDecisionLog(prefix + "no matching " + (allowContrabandCargo ? string.Empty : "legal ") + "unreserved jobs found at " + ship.CurrentHarbor + ".");
             }
             else
             {
+                string contrabandNote = bestPlan.HasContraband ? " Includes contraband." : string.Empty;
+                string skippedNote = bestPlan.ContrabandSkipped > 0 && !allowContrabandCargo
+                    ? string.Format(" Skipped {0} contraband job(s).", bestPlan.ContrabandSkipped)
+                    : string.Empty;
                 AddDecisionLog(prefix + string.Format(
-                    "best route {0} -> {1}, pay {2:n0}, eta {3}d, score {4:0}.",
-                    bestJob.Start,
-                    bestJob.End,
-                    bestJob.Payment,
-                    bestJob.DistanceInDays,
-                    bestJob.Score));
+                    "best route {0} -> {1}, {2} job(s), pay {3:n0}, eta {4}d, score {5:0}.{6}{7}",
+                    bestPlan.Start,
+                    bestPlan.End,
+                    bestPlan.Jobs.Count,
+                    bestPlan.Payment,
+                    bestPlan.DistanceInDays,
+                    bestPlan.Score,
+                    contrabandNote,
+                    skippedNote));
             }
 
             if (liveActions)
             {
-                TriggerNativeAiCastOut(ship, reason);
+                if (bestPlan == null)
+                {
+                    SetNativeAiState(ship, false);
+                    ClearNativeCargoGuard(ship);
+                    AddDecisionLog(prefix + "live dispatch held so native AI cannot choose blocked cargo.");
+                }
+                else
+                {
+                    DispatchJobPlan(ship, bestPlan, reason);
+                }
             }
             else
             {
@@ -920,12 +971,91 @@ namespace TransOcean2FleetAutomation.Direct
             return ship.RawShip;
         }
 
+        private void RefreshContrabandFreightCache()
+        {
+            contrabandFreightByName.Clear();
+
+            if (getFreightAttributesMethod != null)
+            {
+                try
+                {
+                    object rawAttributes = getFreightAttributesMethod.Invoke(staticSqLite, null);
+                    IDictionary dictionary = rawAttributes as IDictionary;
+                    if (dictionary != null)
+                    {
+                        foreach (DictionaryEntry entry in dictionary)
+                        {
+                            string freight = entry.Key == null ? string.Empty : entry.Key.ToString();
+                            object attributes = entry.Value;
+                            if (string.IsNullOrEmpty(freight))
+                            {
+                                freight = ReadString(attributes, "Freight");
+                            }
+
+                            if (!string.IsNullOrEmpty(freight) && ReadBool(attributes, "Smugglersware"))
+                            {
+                                contrabandFreightByName[freight] = true;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        IEnumerable attributes = rawAttributes as IEnumerable;
+                        if (attributes != null)
+                        {
+                            foreach (object freightAttributes in attributes)
+                            {
+                                string freight = ReadString(freightAttributes, "Freight");
+                                if (!string.IsNullOrEmpty(freight) && ReadBool(freightAttributes, "Smugglersware"))
+                                {
+                                    contrabandFreightByName[freight] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AddDecisionLog("Contraband freight lookup failed; using built-in fallback list: " + UnwrapMessage(ex));
+                }
+            }
+
+            if (contrabandFreightByName.Count == 0)
+            {
+                SeedKnownContrabandFreights();
+            }
+        }
+
+        private void SeedKnownContrabandFreights()
+        {
+            for (int i = 0; i < KnownContrabandFreights.Length; i++)
+            {
+                contrabandFreightByName[KnownContrabandFreights[i]] = true;
+            }
+        }
+
+        private string GetCargoPolicyLabel()
+        {
+            return allowContrabandCargo ? "contraband allowed" : "legal cargo only";
+        }
+
+        private bool IsContrabandJob(object rawJob)
+        {
+            if (contrabandFreightByName.Count == 0)
+            {
+                SeedKnownContrabandFreights();
+            }
+
+            string freight = ReadString(rawJob, "Freight");
+            return !string.IsNullOrEmpty(freight) && contrabandFreightByName.ContainsKey(freight);
+        }
+
         private static bool HasWaypointUpgrade(ShipSnapshot ship)
         {
             return ship.Upgrade3 == 5 && (ship.Class == 3 || ship.Class == 4);
         }
 
-        private JobCandidate FindBestJob(ShipSnapshot ship)
+        private JobPlan FindBestJobPlan(ShipSnapshot ship)
         {
             if (getJobsFromStartHarborMethod == null || string.IsNullOrEmpty(ship.CurrentHarbor))
             {
@@ -951,22 +1081,156 @@ namespace TransOcean2FleetAutomation.Direct
                 return null;
             }
 
-            JobCandidate best = null;
+            Dictionary<string, List<JobCandidate>> candidatesByDestination = new Dictionary<string, List<JobCandidate>>(StringComparer.OrdinalIgnoreCase);
+            int contrabandSkipped = 0;
+            int candidateCount = 0;
             foreach (object rawJob in jobs)
             {
-                JobCandidate candidate = JobCandidate.From(rawJob, ship);
+                bool isContraband = IsContrabandJob(rawJob);
+                if (isContraband && !allowContrabandCargo)
+                {
+                    contrabandSkipped++;
+                    continue;
+                }
+
+                JobCandidate candidate = JobCandidate.From(rawJob, ship, isContraband);
                 if (candidate == null)
                 {
                     continue;
                 }
 
-                if (best == null || candidate.Score > best.Score)
+                candidateCount++;
+                List<JobCandidate> destinationCandidates;
+                if (!candidatesByDestination.TryGetValue(candidate.End, out destinationCandidates))
                 {
-                    best = candidate;
+                    destinationCandidates = new List<JobCandidate>();
+                    candidatesByDestination[candidate.End] = destinationCandidates;
+                }
+
+                destinationCandidates.Add(candidate);
+            }
+
+            JobPlan best = null;
+            foreach (KeyValuePair<string, List<JobCandidate>> pair in candidatesByDestination)
+            {
+                JobPlan plan = BuildJobPlanForDestination(ship, pair.Key, pair.Value);
+                if (plan != null && (best == null || plan.Score > best.Score))
+                {
+                    best = plan;
                 }
             }
 
+            if (best != null)
+            {
+                best.ContrabandSkipped = contrabandSkipped;
+                best.CandidateCount = candidateCount;
+            }
+
             return best;
+        }
+
+        private static JobPlan BuildJobPlanForDestination(ShipSnapshot ship, string destination, List<JobCandidate> candidates)
+        {
+            if (candidates == null || candidates.Count == 0 || string.IsNullOrEmpty(destination))
+            {
+                return null;
+            }
+
+            candidates.Sort(delegate(JobCandidate left, JobCandidate right)
+            {
+                return right.Score.CompareTo(left.Score);
+            });
+
+            JobPlan plan = new JobPlan();
+            plan.Start = ship.CurrentHarbor;
+            plan.End = destination;
+
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                JobCandidate candidate = candidates[i];
+                if (!CanAddCandidateToPlan(ship, plan, candidate))
+                {
+                    continue;
+                }
+
+                plan.Add(candidate);
+            }
+
+            return plan.Jobs.Count == 0 ? null : plan;
+        }
+
+        private static bool CanAddCandidateToPlan(ShipSnapshot ship, JobPlan plan, JobCandidate candidate)
+        {
+            if (ship.Volume > 0 && plan.Volume + candidate.Volume > ship.Volume)
+            {
+                return false;
+            }
+
+            if (ship.DeadweightTons > 0 && plan.Weight + candidate.Weight > ship.DeadweightTons)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private bool DispatchJobPlan(ShipSnapshot ship, JobPlan plan, string reason)
+        {
+            if (plan == null || plan.Jobs.Count == 0)
+            {
+                return false;
+            }
+
+            if (updateJobPlayerShipMethod == null || setShipDontLoadJobsMethod == null || setShipGlobalDestinationMethod == null)
+            {
+                AddDecisionLog(string.Format("#{0} {1}: direct legal dispatch bridge is unavailable.", ship.PlayerShipId, ship.Name));
+                return false;
+            }
+
+            try
+            {
+                for (int i = 0; i < plan.Jobs.Count; i++)
+                {
+                    updateJobPlayerShipMethod.Invoke(dsqLite, new object[] { plan.Jobs[i].JobId, ship.PlayerShipId });
+                    WriteField(plan.Jobs[i].RawJob, "PlayerShipID", ship.PlayerShipId);
+                }
+
+                SetNativeCargoGuard(ship, true, plan.End);
+                if (setShipSmugglersWareMethod != null)
+                {
+                    setShipSmugglersWareMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId, plan.HasContraband });
+                    WriteField(ship.RawShip, "HasSmugglerswareLoaded", plan.HasContraband);
+                }
+
+                bool sent = SendCargoEvent("SHIP_CAST_IN_DONE", ship.PlayerShipId);
+                if (!sent && sendShipToDestinationMethod != null)
+                {
+                    sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, plan.End });
+                    sent = true;
+                }
+
+                if (sent)
+                {
+                    ship.DestinationHarbor = plan.End;
+                    AddDecisionLog(string.Format(
+                        "#{0} {1}: loaded {2} {3}job(s) for {4} and dispatched from {5}.",
+                        ship.PlayerShipId,
+                        ship.Name,
+                        plan.Jobs.Count,
+                        plan.HasContraband ? string.Empty : "legal ",
+                        plan.End,
+                        reason));
+                    return true;
+                }
+
+                AddDecisionLog(string.Format("#{0} {1}: loaded jobs but could not trigger cast-out.", ship.PlayerShipId, ship.Name));
+                return false;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(string.Format("#{0} {1}: direct dispatch failed: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
+                return false;
+            }
         }
 
         private bool IsShipIdleInHarbor(ShipSnapshot ship)
@@ -1067,6 +1331,7 @@ namespace TransOcean2FleetAutomation.Direct
                     if (!nativeAiEnabled)
                     {
                         SetNativeAiState(ships[i], false);
+                        ClearNativeCargoGuard(ships[i]);
                     }
                     else if (ships[i].Condition < minimumSailCondition)
                     {
@@ -1076,11 +1341,7 @@ namespace TransOcean2FleetAutomation.Direct
                     }
                     else
                     {
-                        SetNativeAiState(ships[i], true);
-                        if (IsShipIdleInHarbor(ships[i]))
-                        {
-                            TriggerNativeAiCastOut(ships[i], "live actions toggled on");
-                        }
+                        EvaluateShip(ships[i], "live actions toggled on");
                     }
                 }
             }
@@ -1140,6 +1401,53 @@ namespace TransOcean2FleetAutomation.Direct
                 AddDecisionLog(string.Format("#{0} {1}: failed to set native AI state: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
                 return false;
             }
+        }
+
+        private void ClearNativeCargoGuard(ShipSnapshot ship)
+        {
+            SetNativeCargoGuard(ship, false, "None");
+        }
+
+        private bool SetNativeCargoGuard(ShipSnapshot ship, bool dontLoadJobs, string globalDestination)
+        {
+            bool ok = true;
+            if (setShipDontLoadJobsMethod != null)
+            {
+                try
+                {
+                    setShipDontLoadJobsMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId, dontLoadJobs });
+                    WriteField(ship.RawShip, "DontLoadJobs", dontLoadJobs);
+                }
+                catch (Exception ex)
+                {
+                    AddDecisionLog(string.Format("#{0} {1}: failed to set native job-loading guard: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
+                    ok = false;
+                }
+            }
+            else
+            {
+                ok = false;
+            }
+
+            if (setShipGlobalDestinationMethod != null && globalDestination != null)
+            {
+                try
+                {
+                    setShipGlobalDestinationMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId, globalDestination });
+                    WriteField(ship.RawShip, "GlobalDestination", globalDestination);
+                }
+                catch (Exception ex)
+                {
+                    AddDecisionLog(string.Format("#{0} {1}: failed to set native global destination: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
+                    ok = false;
+                }
+            }
+            else if (globalDestination != null)
+            {
+                ok = false;
+            }
+
+            return ok;
         }
 
         private bool TriggerNativeAiCastOut(ShipSnapshot ship, string reason)
@@ -1204,12 +1512,13 @@ namespace TransOcean2FleetAutomation.Direct
             {
                 if (enabled)
                 {
-                    AddDecisionLog(string.Format("#{0} {1}: TO2 Captain enabled; arming native AI.", ship.PlayerShipId, ship.Name));
+                    AddDecisionLog(string.Format("#{0} {1}: TO2 Captain enabled; evaluating automation plan.", ship.PlayerShipId, ship.Name));
                     EvaluateShip(ship, "toggle");
                 }
                 else
                 {
                     SetNativeAiState(ship, false);
+                    ClearNativeCargoGuard(ship);
                     AddDecisionLog(string.Format("#{0} {1}: TO2 Captain disabled; native AI state restored to manual.", ship.PlayerShipId, ship.Name));
                 }
             }
@@ -1502,15 +1811,57 @@ namespace TransOcean2FleetAutomation.Direct
             public float ArrivalCondition;
         }
 
-        private sealed class JobCandidate
+        private sealed class JobPlan
         {
+            public readonly List<JobCandidate> Jobs = new List<JobCandidate>();
             public string Start;
             public string End;
+            public int Volume;
+            public int Weight;
             public long Payment;
             public int DistanceInDays;
             public double Score;
+            public int ContrabandSkipped;
+            public int CandidateCount;
+            public bool HasContraband;
 
-            public static JobCandidate From(object rawJob, ShipSnapshot ship)
+            public void Add(JobCandidate candidate)
+            {
+                Jobs.Add(candidate);
+                if (string.IsNullOrEmpty(Start))
+                {
+                    Start = candidate.Start;
+                }
+
+                if (string.IsNullOrEmpty(End))
+                {
+                    End = candidate.End;
+                }
+
+                Volume += candidate.Volume;
+                Weight += candidate.Weight;
+                Payment += candidate.Payment;
+                DistanceInDays = Math.Max(DistanceInDays, candidate.DistanceInDays);
+                Score += candidate.Score;
+                HasContraband = HasContraband || candidate.IsContraband;
+            }
+        }
+
+        private sealed class JobCandidate
+        {
+            public int JobId;
+            public string Freight;
+            public string Start;
+            public string End;
+            public int Volume;
+            public int Weight;
+            public long Payment;
+            public int DistanceInDays;
+            public double Score;
+            public bool IsContraband;
+            public object RawJob;
+
+            public static JobCandidate From(object rawJob, ShipSnapshot ship, bool isContraband)
             {
                 if (ReadBool(rawJob, "Reserved"))
                 {
@@ -1535,10 +1886,21 @@ namespace TransOcean2FleetAutomation.Direct
                 }
 
                 JobCandidate candidate = new JobCandidate();
+                candidate.RawJob = rawJob;
+                candidate.JobId = ReadInt(rawJob, "JobID");
+                candidate.Freight = ReadString(rawJob, "Freight");
                 candidate.Start = ReadString(rawJob, "Start");
                 candidate.End = ReadString(rawJob, "End");
+                if (candidate.JobId <= 0 || string.IsNullOrEmpty(candidate.End))
+                {
+                    return null;
+                }
+
+                candidate.Volume = volume;
+                candidate.Weight = weight;
                 candidate.Payment = ReadLong(rawJob, "Payment");
                 candidate.DistanceInDays = Math.Max(1, ReadInt(rawJob, "DistanceInDays"));
+                candidate.IsContraband = isContraband;
 
                 int relationshipPoints = ReadInt(rawJob, "RelationshipPoints");
                 long penalty = Math.Max(0L, ReadLong(rawJob, "ContractualPenalty"));
