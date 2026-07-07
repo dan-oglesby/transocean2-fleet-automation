@@ -30,6 +30,7 @@ namespace TransOcean2FleetAutomation.Direct
     {
         private const string LogPrefix = "[TO2FA.Direct]";
         private const string CaptainPrefsPrefix = "TO2FA.Captain.";
+        private const double ChainOpportunityWeight = 0.35;
 
         private static readonly string[] KnownContrabandFreights = new string[]
         {
@@ -533,13 +534,15 @@ namespace TransOcean2FleetAutomation.Direct
                     ? string.Format(" Skipped {0} contraband job(s).", bestPlan.ContrabandSkipped)
                     : string.Empty;
                 AddDecisionLog(prefix + string.Format(
-                    "best route {0} -> {1}, {2} job(s), pay {3:n0}, eta {4}d, score {5:0}.{6}{7}",
+                    "best route {0} -> {1}, {2} job(s), pay {3:n0}, eta {4}d, score {5:0}, total {6:0}.{7}{8}{9}",
                     bestPlan.Start,
                     bestPlan.End,
                     bestPlan.Jobs.Count,
                     bestPlan.Payment,
                     bestPlan.DistanceInDays,
                     bestPlan.Score,
+                    bestPlan.TotalScore,
+                    bestPlan.GetChainSummary(),
                     contrabandNote,
                     skippedNote));
             }
@@ -1057,7 +1060,12 @@ namespace TransOcean2FleetAutomation.Direct
 
         private JobPlan FindBestJobPlan(ShipSnapshot ship)
         {
-            if (getJobsFromStartHarborMethod == null || string.IsNullOrEmpty(ship.CurrentHarbor))
+            return FindBestJobPlanFromHarbor(ship, ship.CurrentHarbor, true);
+        }
+
+        private JobPlan FindBestJobPlanFromHarbor(ShipSnapshot ship, string startHarbor, bool includeChainOpportunity)
+        {
+            if (getJobsFromStartHarborMethod == null || string.IsNullOrEmpty(startHarbor) || startHarbor == "None")
             {
                 return null;
             }
@@ -1067,11 +1075,11 @@ namespace TransOcean2FleetAutomation.Direct
             {
                 rawJobs = getJobsFromStartHarborMethod.Invoke(
                     dsqLite,
-                    new object[] { ship.CurrentHarbor, ship.FreightType, ship.Class });
+                    new object[] { startHarbor, ship.FreightType, ship.Class });
             }
             catch (Exception ex)
             {
-                AddDecisionLog("Job lookup failed for " + ship.Name + ": " + UnwrapMessage(ex));
+                AddDecisionLog("Job lookup failed for " + ship.Name + " at " + startHarbor + ": " + UnwrapMessage(ex));
                 return null;
             }
 
@@ -1113,8 +1121,18 @@ namespace TransOcean2FleetAutomation.Direct
             JobPlan best = null;
             foreach (KeyValuePair<string, List<JobCandidate>> pair in candidatesByDestination)
             {
-                JobPlan plan = BuildJobPlanForDestination(ship, pair.Key, pair.Value);
-                if (plan != null && (best == null || plan.Score > best.Score))
+                JobPlan plan = BuildJobPlanForDestination(ship, startHarbor, pair.Key, pair.Value);
+                if (plan == null)
+                {
+                    continue;
+                }
+
+                if (includeChainOpportunity)
+                {
+                    AddChainOpportunity(ship, plan);
+                }
+
+                if (best == null || plan.TotalScore > best.TotalScore)
                 {
                     best = plan;
                 }
@@ -1129,7 +1147,27 @@ namespace TransOcean2FleetAutomation.Direct
             return best;
         }
 
-        private static JobPlan BuildJobPlanForDestination(ShipSnapshot ship, string destination, List<JobCandidate> candidates)
+        private void AddChainOpportunity(ShipSnapshot ship, JobPlan plan)
+        {
+            if (plan == null || string.IsNullOrEmpty(plan.End) || plan.End == plan.Start)
+            {
+                return;
+            }
+
+            JobPlan followUp = FindBestJobPlanFromHarbor(ship, plan.End, false);
+            if (followUp == null)
+            {
+                return;
+            }
+
+            plan.ChainScore = followUp.Score * ChainOpportunityWeight;
+            plan.ChainPayment = followUp.Payment;
+            plan.ChainJobs = followUp.Jobs.Count;
+            plan.ChainEnd = followUp.End;
+            plan.ChainDistanceInDays = followUp.DistanceInDays;
+        }
+
+        private static JobPlan BuildJobPlanForDestination(ShipSnapshot ship, string startHarbor, string destination, List<JobCandidate> candidates)
         {
             if (candidates == null || candidates.Count == 0 || string.IsNullOrEmpty(destination))
             {
@@ -1142,7 +1180,7 @@ namespace TransOcean2FleetAutomation.Direct
             });
 
             JobPlan plan = new JobPlan();
-            plan.Start = ship.CurrentHarbor;
+            plan.Start = startHarbor;
             plan.End = destination;
 
             for (int i = 0; i < candidates.Count; i++)
@@ -1843,9 +1881,35 @@ namespace TransOcean2FleetAutomation.Direct
             public long Payment;
             public int DistanceInDays;
             public double Score;
+            public double ChainScore;
+            public long ChainPayment;
+            public int ChainJobs;
+            public string ChainEnd;
+            public int ChainDistanceInDays;
             public int ContrabandSkipped;
             public int CandidateCount;
             public bool HasContraband;
+
+            public double TotalScore
+            {
+                get { return Score + ChainScore; }
+            }
+
+            public string GetChainSummary()
+            {
+                if (ChainJobs <= 0 || string.IsNullOrEmpty(ChainEnd))
+                {
+                    return string.Empty;
+                }
+
+                return string.Format(
+                    " Chain opportunity: +{0:0} score toward {1} ({2} follow-on job(s), {3:n0} pay, eta {4}d).",
+                    ChainScore,
+                    ChainEnd,
+                    ChainJobs,
+                    ChainPayment,
+                    ChainDistanceInDays);
+            }
 
             public void Add(JobCandidate candidate)
             {

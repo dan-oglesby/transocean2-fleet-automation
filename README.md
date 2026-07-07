@@ -25,6 +25,8 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Cargo automation defaults to legal cargo only. Freights marked `Smugglersware` by the game's freight attributes are excluded unless `Allow contraband` is enabled in the panel.
 - Direct dispatch attaches the selected jobs itself, blocks the native AI loader from adding extra cargo, and then uses the built-in cast-out movement path.
 - When multiple legal jobs fit for the same destination, the planner can load them together as same-port easy wins.
+- Route scoring also looks one harbor ahead: destinations get a discounted follow-on opportunity bonus when the arrival harbor has another strong legal job bundle available for the same ship type.
+- The chain bonus affects which first-leg route is chosen; the mod still only accepts and loads the immediate destination's jobs, then re-evaluates after arrival.
 - Holds enabled ships below the configured minimum condition-to-sail threshold instead of sending them back out for normal jobs.
 - Auto repairs can send low-condition ships to the nearest safe reachable repair dock, then start the game's native repair flow when the ship is in a repair-capable harbor.
 - Maintenance routing runs before the normal idle-in-harbor check, so just-arrived ships with transitional statuses still get an active repair decision when they have a real current harbor.
@@ -91,3 +93,5 @@ Only enable the loader for controlled smoke tests right now.
 ## Safety notes
 
 The current direct mod can perform live actions when the panel's `Live actions` toggle is on. It uses the game's own player-ship AI state, ship cast-out event path, direct destination routing, and repair methods, so enabled ships may accept work, depart, refuel, repair, upgrade, and spend credits. Normal cargo dispatch is no longer handed fully to the native job loader: the mod chooses jobs, excludes contraband by default, attaches same-destination jobs that fit, marks the ship as `DontLoadJobs`, and then lets the native cast-out path move the ship. The mod adds an extra minimum condition-to-sail gate, defaulting to 85%, before it triggers a normal job departure. Below that gate, auto repairs run before normal idle-state checks: ships in a real current harbor can be routed to a repair dock only when the game reports zero sink chance on arrival, then repaired up to the configured repair target when treasury reserves allow. Ships underway are held until they reach a harbor. Turning `Live actions` off restores manual AI state for currently enabled ships. Avoid multiplayer testing while any loader, plugin, or direct patch is installed.
+
+Auto-upgrade automation is not enabled yet. The native upgrade bridge exists, but the mod still needs an explicit policy for choosing upgrade IDs, preserving treasury reserve, and deciding when a ship should spend days in an upgrade dock.
