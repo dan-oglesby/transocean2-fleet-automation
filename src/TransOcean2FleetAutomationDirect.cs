@@ -31,6 +31,7 @@ namespace TransOcean2FleetAutomation.Direct
         private const string LogPrefix = "[TO2FA.Direct]";
         private const string CaptainPrefsPrefix = "TO2FA.Captain.";
         private const double ChainOpportunityWeight = 0.35;
+        private const float DispatchSettleSeconds = 20f;
 
         private static readonly string[] KnownContrabandFreights = new string[]
         {
@@ -39,7 +40,16 @@ namespace TransOcean2FleetAutomation.Direct
             "QuestionableGoods"
         };
 
+        private static readonly int[] UpgradeCandidateIds = new int[]
+        {
+            7, 8, 9, 10, 11, 12, 13, 14, 15,
+            4, 1, 5, 2, 3, 6
+        };
+
         private readonly Dictionary<int, bool> captainEnabledByShipId = new Dictionary<int, bool>();
+        private readonly Dictionary<int, float> lastDispatchRealtimeByShipId = new Dictionary<int, float>();
+        private readonly Dictionary<int, string> lastSeenShipNameById = new Dictionary<int, string>();
+        private readonly Dictionary<int, bool> missingShipWarnedByShipId = new Dictionary<int, bool>();
         private readonly Dictionary<string, bool> contrabandFreightByName = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private readonly List<ShipSnapshot> ships = new List<ShipSnapshot>();
         private readonly List<string> decisionLog = new List<string>();
@@ -55,6 +65,9 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getHarborMethod;
         private MethodInfo getFreightAttributesMethod;
         private MethodInfo getRepairDockHarborsMethod;
+        private MethodInfo getUpgradeDockHarborsMethod;
+        private MethodInfo getUpgradeExportFromHarborMethod;
+        private MethodInfo getBusinessSharesFromRegionMethod;
         private MethodInfo getHarborDistanceMethod;
         private MethodInfo getRegionOfHarborMethod;
         private MethodInfo getShipClassesMethod;
@@ -62,7 +75,10 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo setShipDontLoadJobsMethod;
         private MethodInfo setShipGlobalDestinationMethod;
         private MethodInfo setShipSmugglersWareMethod;
+        private MethodInfo updatePlayerShipDestinationHarborMethod;
         private MethodInfo repairPlayerShipMethod;
+        private MethodInfo upgradePlayerShipMethod;
+        private MethodInfo getUpgradeDockOwnerMethod;
         private MethodInfo sendShipToDestinationMethod;
         private MethodInfo getRemainingConditionOnArrivalMethod;
         private MethodInfo getShipSinkChanceMethod;
@@ -75,6 +91,7 @@ namespace TransOcean2FleetAutomation.Direct
         private bool showPanel;
         private bool liveActions = true;
         private bool autoRepairs = true;
+        private bool autoUpgrades = true;
         private bool evaluateEnabledShipsEveryTick = true;
         private bool allowContrabandCargo;
         private bool gameSessionActive;
@@ -95,6 +112,7 @@ namespace TransOcean2FleetAutomation.Direct
             showPanel = PlayerPrefs.GetInt("TO2FA.ShowPanel", 1) == 1;
             liveActions = PlayerPrefs.GetInt("TO2FA.LiveActions", 1) == 1;
             autoRepairs = PlayerPrefs.GetInt("TO2FA.AutoRepairs", 1) == 1;
+            autoUpgrades = PlayerPrefs.GetInt("TO2FA.AutoUpgrades", 1) == 1;
             evaluateEnabledShipsEveryTick = PlayerPrefs.GetInt("TO2FA.TickEnabled", 1) == 1;
             allowContrabandCargo = PlayerPrefs.GetInt("TO2FA.AllowContrabandCargo", 0) == 1;
             minimumSailCondition = PlayerPrefs.GetFloat("TO2FA.MinimumSailCondition", 85f);
@@ -181,6 +199,15 @@ namespace TransOcean2FleetAutomation.Direct
                 PlayerPrefs.SetInt("TO2FA.AutoRepairs", autoRepairs ? 1 : 0);
                 PlayerPrefs.Save();
                 AddDecisionLog("Auto repairs " + (autoRepairs ? "enabled." : "disabled."));
+            }
+
+            bool newAutoUpgrades = GUILayout.Toggle(autoUpgrades, "Auto upgrades", GUILayout.Width(130f));
+            if (newAutoUpgrades != autoUpgrades)
+            {
+                autoUpgrades = newAutoUpgrades;
+                PlayerPrefs.SetInt("TO2FA.AutoUpgrades", autoUpgrades ? 1 : 0);
+                PlayerPrefs.Save();
+                AddDecisionLog("Auto upgrades " + (autoUpgrades ? "enabled." : "disabled."));
             }
 
             bool newAllowContrabandCargo = GUILayout.Toggle(allowContrabandCargo, "Allow contraband", GUILayout.Width(145f));
@@ -359,6 +386,7 @@ namespace TransOcean2FleetAutomation.Direct
             setShipDontLoadJobsMethod = dsqLiteType.GetMethod("SetPlayerShipAIStateDontLoadJobs", new Type[] { typeof(int), typeof(bool) });
             setShipGlobalDestinationMethod = dsqLiteType.GetMethod("SetPlayerShipAIStateGlobalDestination", new Type[] { typeof(int), typeof(string) });
             setShipSmugglersWareMethod = dsqLiteType.GetMethod("SetShipSmugglersWare", new Type[] { typeof(int), typeof(bool) });
+            updatePlayerShipDestinationHarborMethod = dsqLiteType.GetMethod("UpdatePlayerShipDestinationHarbor", new Type[] { typeof(int), typeof(string) });
             getJobsFromStartHarborMethod = dsqLiteType.GetMethod(
                 "GetAllJobsFromStartHarbor",
                 new Type[] { typeof(string), typeof(string), typeof(int) });
@@ -366,6 +394,9 @@ namespace TransOcean2FleetAutomation.Direct
             getHarborMethod = staticSqLiteType.GetMethod("GetHarbor", new Type[] { typeof(string) });
             getFreightAttributesMethod = staticSqLiteType.GetMethod("GetFreightAttributes", Type.EmptyTypes);
             getRepairDockHarborsMethod = staticSqLiteType.GetMethod("GetRepairDockHarbors", Type.EmptyTypes);
+            getUpgradeDockHarborsMethod = staticSqLiteType.GetMethod("GetUpgradeDockHarbors", Type.EmptyTypes);
+            getUpgradeExportFromHarborMethod = staticSqLiteType.GetMethod("GetUpgradeExportFromHarbor", new Type[] { typeof(string) });
+            getBusinessSharesFromRegionMethod = staticSqLiteType.GetMethod("GetBusinessSharesFromRegion", new Type[] { typeof(int) });
             getHarborDistanceMethod = staticSqLiteType.GetMethod("GetHarborDistance", new Type[] { typeof(string), typeof(string), typeof(int), typeof(bool) });
             getRegionOfHarborMethod = staticSqLiteType.GetMethod("GetRegionOfHarbor", new Type[] { typeof(string) });
             getShipClassesMethod = staticSqLiteType.GetMethod("GetShipClasses", new Type[] { typeof(int) });
@@ -381,6 +412,8 @@ namespace TransOcean2FleetAutomation.Direct
                     new Type[] { playerShipsType, typeof(string), typeof(string) });
             }
             sendShipToDestinationMethod = shipFactoryType.GetMethod("SendShipToDestination", new Type[] { typeof(int), typeof(string) });
+            upgradePlayerShipMethod = shipFactoryType.GetMethod("UpgradePlayerShip", new Type[] { typeof(int), typeof(int), typeof(int), typeof(int), typeof(long) });
+            getUpgradeDockOwnerMethod = shipFactoryType.GetMethod("GetUpgradeDockOwner", new Type[] { typeof(int) });
             getShipSinkChanceMethod = shipFactoryType.GetMethod("GetShipSinkChance", new Type[] { typeof(int), typeof(float) });
             getDaysForRepairMethod = shipFactoryType.GetMethod("GetDaysForRepair", new Type[] { typeof(float), typeof(int) });
             Type timerType = FindType("Deck13HH.Timer");
@@ -421,6 +454,7 @@ namespace TransOcean2FleetAutomation.Direct
                 playerId = ToInt(getPlayerIdMethod.Invoke(dsqLite, null));
                 playerCredits = ToLong(getPlayerCreditsMethod.Invoke(dsqLite, new object[] { playerId }));
 
+                Dictionary<int, bool> visibleShipIds = new Dictionary<int, bool>();
                 object rawShips = getAllPlayerShipsMethod.Invoke(dsqLite, new object[] { playerId });
                 IEnumerable enumerableShips = rawShips as IEnumerable;
                 if (enumerableShips != null)
@@ -430,10 +464,21 @@ namespace TransOcean2FleetAutomation.Direct
                         ShipSnapshot ship = ShipSnapshot.From(rawShip);
                         ships.Add(ship);
                         EnsureCaptainPreferenceLoaded(ship.PlayerShipId);
+                        visibleShipIds[ship.PlayerShipId] = true;
+                        lastSeenShipNameById[ship.PlayerShipId] = ship.Name;
+                        if (missingShipWarnedByShipId.ContainsKey(ship.PlayerShipId))
+                        {
+                            missingShipWarnedByShipId.Remove(ship.PlayerShipId);
+                        }
                     }
                 }
 
                 gameSessionActive = playerId > 0 && ships.Count > 0;
+                if (gameSessionActive)
+                {
+                    WarnForMissingEnabledShips(visibleShipIds);
+                }
+
                 statusText = gameSessionActive
                     ? string.Format("Controllers ready. {0} player ships visible.", ships.Count)
                     : "Waiting for an active game fleet...";
@@ -492,11 +537,19 @@ namespace TransOcean2FleetAutomation.Direct
 
             string prefix = string.Format("#{0} {1}: ", ship.PlayerShipId, ship.Name);
             long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
+            long upgradeReserve = Math.Max(1500000L, Math.Abs(playerCredits) / 3L);
 
             if (IsRepairPending(ship))
             {
                 SetNativeAiState(ship, false);
                 AddDecisionLog(prefix + "repair is already in progress; keeping automation on hold.");
+                return;
+            }
+
+            if (IsUpgradePending(ship))
+            {
+                SetNativeAiState(ship, false);
+                AddDecisionLog(prefix + "upgrade is already in progress; keeping automation on hold.");
                 return;
             }
 
@@ -506,20 +559,31 @@ namespace TransOcean2FleetAutomation.Direct
                 return;
             }
 
+            if (IsDispatchSettling(ship))
+            {
+                AddDecisionLog(prefix + "waiting for recent dispatch state to settle before taking another action.");
+                return;
+            }
+
             if (!IsShipIdleInHarbor(ship))
             {
-                AddDecisionLog(prefix + (liveActions ? "native AI armed; waiting because ship is not idle in a harbor" : "waiting; ship is not idle in a harbor") + " (" + DescribeShipLocationState(ship) + ").");
+                AddDecisionLog(prefix + "waiting; ship is not idle in a harbor" + " (" + DescribeShipLocationState(ship) + ").");
                 return;
             }
 
             if (liveActions)
             {
-                SetNativeAiState(ship, true);
+                SetNativeAiState(ship, false);
             }
 
             if (ship.Condition < minimumSailCondition + 5f && playerCredits > reserve * 2L)
             {
                 AddDecisionLog(prefix + string.Format("maintenance soon: condition {0:0}% is close to sail minimum {1:0}%.", ship.Condition, minimumSailCondition));
+            }
+
+            if (liveActions && autoUpgrades && TryHandleUpgradeNeed(ship, prefix, upgradeReserve))
+            {
+                return;
             }
 
             JobPlan bestPlan = FindBestJobPlan(ship);
@@ -769,20 +833,47 @@ namespace TransOcean2FleetAutomation.Direct
                 return false;
             }
 
+            return TrySendToServiceDock(ship, prefix, "repair", destination.Harbor, destination.Distance, destination.ArrivalCondition);
+        }
+
+        private bool TrySendToServiceDock(ShipSnapshot ship, string prefix, string serviceName, string harbor, float distance, float arrivalCondition)
+        {
+            JobPlan offsetPlan = FindJobPlanToDestination(ship, ship.CurrentHarbor, harbor);
+            if (offsetPlan != null)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "{0} trip has {1} legal offset job(s) to {2}, pay {3:n0}.",
+                    Capitalize(serviceName),
+                    offsetPlan.Jobs.Count,
+                    harbor,
+                    offsetPlan.Payment));
+
+                if (DispatchJobPlan(ship, offsetPlan, serviceName + " dock routing"))
+                {
+                    return true;
+                }
+
+                AddDecisionLog(prefix + serviceName + " cargo offset dispatch failed; trying direct service routing.");
+            }
+
             try
             {
-                sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, destination.Harbor });
-                ship.DestinationHarbor = destination.Harbor;
+                SetNativeAiState(ship, false);
+                SetNativeDestinationHarbor(ship, harbor);
+                sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, harbor });
+                ship.DestinationHarbor = harbor;
+                MarkShipDispatched(ship);
                 AddDecisionLog(prefix + string.Format(
-                    "routing to repair dock at {0} ({1:0} distance units, arrival condition about {2:0}%) before taking more work.",
-                    destination.Harbor,
-                    destination.Distance,
-                    destination.ArrivalCondition));
+                    "routing to {0} dock at {1} ({2:0} distance units, arrival condition about {3:0}%) before taking more work.",
+                    serviceName,
+                    harbor,
+                    distance,
+                    arrivalCondition));
                 return true;
             }
             catch (Exception ex)
             {
-                AddDecisionLog(prefix + "failed to route to repair dock: " + UnwrapMessage(ex));
+                AddDecisionLog(prefix + "failed to route to " + serviceName + " dock: " + UnwrapMessage(ex));
                 return false;
             }
         }
@@ -858,6 +949,244 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return best;
+        }
+
+        private bool TryHandleUpgradeNeed(ShipSnapshot ship, string prefix, long reserve)
+        {
+            if (upgradePlayerShipMethod == null || getUpgradeDockHarborsMethod == null || getRegionOfHarborMethod == null)
+            {
+                return false;
+            }
+
+            if (!HasFleetUpgradeTurn(ship))
+            {
+                return false;
+            }
+
+            UpgradePlan currentPlan = BuildUpgradePlan(ship, ship.CurrentHarbor, reserve);
+            if (currentPlan != null && currentPlan.CanStart)
+            {
+                return TryStartUpgrade(ship, prefix, currentPlan);
+            }
+
+            UpgradeDockCandidate destination = FindBestUpgradeDock(ship, reserve);
+            if (destination == null)
+            {
+                return false;
+            }
+
+            SetNativeAiState(ship, false);
+            ClearNativeCargoGuard(ship);
+            return TrySendToServiceDock(ship, prefix, "upgrade", destination.Harbor, destination.Distance, destination.ArrivalCondition);
+        }
+
+        private bool HasFleetUpgradeTurn(ShipSnapshot ship)
+        {
+            int minimumUpgradeCount = int.MaxValue;
+            for (int i = 0; i < ships.Count; i++)
+            {
+                ShipSnapshot fleetShip = ships[i];
+                if (!IsCaptainEnabled(fleetShip.PlayerShipId))
+                {
+                    continue;
+                }
+
+                minimumUpgradeCount = Math.Min(minimumUpgradeCount, fleetShip.UpgradeCount());
+            }
+
+            if (minimumUpgradeCount == int.MaxValue)
+            {
+                return true;
+            }
+
+            return ship.UpgradeCount() <= minimumUpgradeCount;
+        }
+
+        private bool TryStartUpgrade(ShipSnapshot ship, string prefix, UpgradePlan plan)
+        {
+            object rawShip = GetLatestRawShip(ship);
+            if (rawShip == null)
+            {
+                AddDecisionLog(prefix + "upgrade deferred; native ship record is unavailable.");
+                return false;
+            }
+
+            try
+            {
+                SetNativeAiState(ship, false);
+                ClearNativeCargoGuard(ship);
+                upgradePlayerShipMethod.Invoke(
+                    shipFactory,
+                    new object[] { ship.PlayerShipId, plan.UpgradeId, plan.Slot, plan.UpgradeDockOwner, plan.UpgradeDockOwnerShares });
+
+                ship.SetUpgrade(plan.Slot, plan.UpgradeId);
+                ship.Upgraded = false;
+                WriteField(rawShip, "Upgraded", false);
+                WriteField(rawShip, "Upgrade" + plan.Slot, plan.UpgradeId);
+
+                AddDecisionLog(prefix + string.Format(
+                    "upgrade started at {0}: {1} (ID {2}, slot {3}) for about {4:n0} credits.",
+                    ship.CurrentHarbor,
+                    plan.Name,
+                    plan.UpgradeId,
+                    plan.Slot,
+                    plan.EstimatedCost));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(prefix + "upgrade start failed: " + UnwrapMessage(ex));
+                return false;
+            }
+        }
+
+        private UpgradeDockCandidate FindBestUpgradeDock(ShipSnapshot ship, long reserve)
+        {
+            if (getUpgradeDockHarborsMethod == null || getHarborDistanceMethod == null)
+            {
+                return null;
+            }
+
+            IEnumerable harbors = null;
+            try
+            {
+                harbors = getUpgradeDockHarborsMethod.Invoke(staticSqLite, null) as IEnumerable;
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (harbors == null)
+            {
+                return null;
+            }
+
+            bool hasWaypointUpgrade = HasWaypointUpgrade(ship);
+            object rawShip = GetLatestRawShip(ship);
+            UpgradeDockCandidate best = null;
+            foreach (object harbor in harbors)
+            {
+                string city = ReadString(harbor, "City");
+                if (string.IsNullOrEmpty(city) || city == ship.CurrentHarbor)
+                {
+                    continue;
+                }
+
+                int harborClass = ReadInt(harbor, "HarborClass");
+                if (harborClass > 0 && ship.Class > harborClass)
+                {
+                    continue;
+                }
+
+                UpgradePlan plan = BuildUpgradePlan(ship, city, reserve);
+                if (plan == null || !plan.CanStart)
+                {
+                    continue;
+                }
+
+                float distance = 0f;
+                try
+                {
+                    distance = Convert.ToSingle(getHarborDistanceMethod.Invoke(staticSqLite, new object[] { ship.CurrentHarbor, city, ship.Class, hasWaypointUpgrade }));
+                }
+                catch
+                {
+                    distance = 0f;
+                }
+
+                if (distance <= 0f)
+                {
+                    continue;
+                }
+
+                float arrivalCondition = GetRemainingConditionOnArrival(rawShip, ship, city);
+                int sinkChance = GetShipSinkChance(arrivalCondition);
+                if (sinkChance > 0)
+                {
+                    continue;
+                }
+
+                if (best == null || plan.Score > best.Plan.Score || (Math.Abs(plan.Score - best.Plan.Score) < 0.1 && distance < best.Distance))
+                {
+                    best = new UpgradeDockCandidate();
+                    best.Harbor = city;
+                    best.Distance = distance;
+                    best.ArrivalCondition = arrivalCondition;
+                    best.Plan = plan;
+                }
+            }
+
+            return best;
+        }
+
+        private UpgradePlan BuildUpgradePlan(ShipSnapshot ship, string harborName, long reserve)
+        {
+            if (!IsHarborUpgradeDock(harborName))
+            {
+                return null;
+            }
+
+            long spendable = playerCredits - reserve;
+            if (spendable <= 0L)
+            {
+                return null;
+            }
+
+            UpgradePlan best = null;
+            for (int i = 0; i < UpgradeCandidateIds.Length; i++)
+            {
+                int upgradeId = UpgradeCandidateIds[i];
+                if (!IsUpgradeCompatibleWithShip(ship, upgradeId) || !IsUpgradeAvailableAtHarbor(ship, harborName, upgradeId))
+                {
+                    continue;
+                }
+
+                int slot = GetUpgradeSlotForShip(ship, upgradeId);
+                if (slot == 0)
+                {
+                    continue;
+                }
+
+                long cost = EstimateUpgradeCost(ship, upgradeId);
+                if (cost <= 0L || cost > spendable)
+                {
+                    continue;
+                }
+
+                UpgradePlan plan = new UpgradePlan();
+                plan.CanStart = true;
+                plan.Harbor = harborName;
+                plan.UpgradeId = upgradeId;
+                plan.Slot = slot;
+                plan.Name = GetUpgradeName(upgradeId);
+                plan.EstimatedCost = cost;
+                plan.Score = ScoreUpgradeCandidate(ship, harborName, upgradeId, cost);
+                plan.Region = GetRegionOfHarbor(harborName);
+                plan.UpgradeDockOwner = GetUpgradeDockOwner(plan.Region);
+                plan.UpgradeDockOwnerShares = EstimateUpgradeDockOwnerShares(plan.Region, cost);
+
+                if (best == null || plan.Score > best.Score || (Math.Abs(plan.Score - best.Score) < 0.1 && plan.EstimatedCost < best.EstimatedCost))
+                {
+                    best = plan;
+                }
+            }
+
+            return best;
+        }
+
+        private bool IsHarborUpgradeDock(string harborName)
+        {
+            object harbor = GetHarbor(harborName);
+            return harbor != null && ReadBool(harbor, "UpgradeDock");
+        }
+
+        private bool IsHeadingToUpgradeDock(ShipSnapshot ship)
+        {
+            return ship != null
+                && !string.IsNullOrEmpty(ship.DestinationHarbor)
+                && ship.DestinationHarbor != ship.CurrentHarbor
+                && IsHarborUpgradeDock(ship.DestinationHarbor);
         }
 
         private bool IsHarborRepairDock(string harborName)
@@ -1058,6 +1387,369 @@ namespace TransOcean2FleetAutomation.Direct
             return ship.Upgrade3 == 5 && (ship.Class == 3 || ship.Class == 4);
         }
 
+        private static bool IsFreightUpgrade(int upgradeId)
+        {
+            return upgradeId >= 7 && upgradeId <= 15;
+        }
+
+        private static bool IsUpgradeCompatibleWithShip(ShipSnapshot ship, int upgradeId)
+        {
+            if (ship == null)
+            {
+                return false;
+            }
+
+            if (IsFreightUpgrade(upgradeId))
+            {
+                string freightType = GetUpgradeFreightType(upgradeId);
+                return !string.IsNullOrEmpty(freightType)
+                    && string.Equals(ship.FreightType, freightType, StringComparison.OrdinalIgnoreCase)
+                    && ship.Upgrade4 != upgradeId
+                    && ship.Upgrade5 != upgradeId;
+            }
+
+            if (upgradeId == 5)
+            {
+                return ship.Class == 3 || ship.Class == 4;
+            }
+
+            return upgradeId >= 1 && upgradeId <= 6;
+        }
+
+        private static int GetBaseUpgradeSlot(int upgradeId)
+        {
+            if (upgradeId == 1 || upgradeId == 2)
+            {
+                return 1;
+            }
+
+            if (upgradeId == 3 || upgradeId == 4)
+            {
+                return 2;
+            }
+
+            if (upgradeId == 5 || upgradeId == 6)
+            {
+                return 3;
+            }
+
+            if (IsFreightUpgrade(upgradeId))
+            {
+                return 4;
+            }
+
+            return 0;
+        }
+
+        private static int GetUpgradeSlotForShip(ShipSnapshot ship, int upgradeId)
+        {
+            int slot = GetBaseUpgradeSlot(upgradeId);
+            if (slot == 0)
+            {
+                return 0;
+            }
+
+            if (slot == 4)
+            {
+                if (ship.Upgrade4 == 0)
+                {
+                    return 4;
+                }
+
+                if (ship.Upgrade5 == 0)
+                {
+                    return 5;
+                }
+
+                return 0;
+            }
+
+            return ship.GetUpgrade(slot) == 0 ? slot : 0;
+        }
+
+        private static long EstimateUpgradeCost(ShipSnapshot ship, int upgradeId)
+        {
+            long basePrice = GetUpgradeBasePrice(upgradeId);
+            return basePrice <= 0L ? 0L : basePrice * Math.Max(1, ship.Class);
+        }
+
+        private static long GetUpgradeBasePrice(int upgradeId)
+        {
+            if (upgradeId == 1 || upgradeId == 2)
+            {
+                return 1500000L;
+            }
+
+            if (upgradeId == 3 || upgradeId == 4)
+            {
+                return 2000000L;
+            }
+
+            if (upgradeId == 5 || upgradeId == 6)
+            {
+                return 2500000L;
+            }
+
+            if (IsFreightUpgrade(upgradeId))
+            {
+                return 500000L;
+            }
+
+            return 0L;
+        }
+
+        private static string GetUpgradeFreightType(int upgradeId)
+        {
+            if (upgradeId >= 7 && upgradeId <= 9)
+            {
+                return "Container";
+            }
+
+            if (upgradeId >= 10 && upgradeId <= 12)
+            {
+                return "Bulk";
+            }
+
+            if (upgradeId >= 13 && upgradeId <= 15)
+            {
+                return "Tank";
+            }
+
+            return string.Empty;
+        }
+
+        private static string[] GetUpgradeFreights(int upgradeId)
+        {
+            switch (upgradeId)
+            {
+                case 7:
+                    return new string[] { "Electronics", "LuxuryGoods", "Machinery" };
+                case 8:
+                    return new string[] { "Medicines", "Meat", "FruitVegetables" };
+                case 9:
+                    return new string[] { "RadioactiveMaterials", "AlcoholicBeverages", "Weapons" };
+                case 10:
+                    return new string[] { "Crop", "Sand", "Cement" };
+                case 11:
+                    return new string[] { "Coffee", "Timber", "Fertilizer" };
+                case 12:
+                    return new string[] { "Bauxite", "Phosphate", "Salts" };
+                case 13:
+                    return new string[] { "VegetableOil", "AnimalOil" };
+                case 14:
+                    return new string[] { "LiquidGas", "FuelOil" };
+                case 15:
+                    return new string[] { "Kerosine", "LiquidChemicals" };
+                default:
+                    return new string[0];
+            }
+        }
+
+        private static string GetUpgradeName(int upgradeId)
+        {
+            switch (upgradeId)
+            {
+                case 1:
+                    return "speed upgrade";
+                case 2:
+                    return "repair-time upgrade";
+                case 3:
+                    return "tug-fee upgrade";
+                case 4:
+                    return "fuel-consumption upgrade";
+                case 5:
+                    return "waypoint upgrade";
+                case 6:
+                    return "range upgrade";
+                default:
+                    return GetUpgradeFreightType(upgradeId) + " cargo revenue upgrade";
+            }
+        }
+
+        private bool IsUpgradeAvailableAtHarbor(ShipSnapshot ship, string harborName, int upgradeId)
+        {
+            if (!IsFreightUpgrade(upgradeId))
+            {
+                return true;
+            }
+
+            bool harborDataKnown = false;
+            bool supportsFreight = HarborSupportsUpgradeFreight(harborName, ship.FreightType, GetUpgradeFreights(upgradeId), out harborDataKnown);
+            return !harborDataKnown || supportsFreight;
+        }
+
+        private bool HarborSupportsUpgradeFreight(string harborName, string freightType, string[] upgradeFreights, out bool harborDataKnown)
+        {
+            harborDataKnown = false;
+            if (getUpgradeExportFromHarborMethod == null || upgradeFreights == null || upgradeFreights.Length == 0)
+            {
+                return true;
+            }
+
+            object rawExports = null;
+            try
+            {
+                rawExports = getUpgradeExportFromHarborMethod.Invoke(staticSqLite, new object[] { harborName });
+            }
+            catch
+            {
+                return true;
+            }
+
+            IDictionary dictionary = rawExports as IDictionary;
+            if (dictionary == null)
+            {
+                return true;
+            }
+
+            object rawFreights = null;
+            foreach (DictionaryEntry entry in dictionary)
+            {
+                string key = entry.Key == null ? string.Empty : entry.Key.ToString();
+                if (string.Equals(key, freightType, StringComparison.OrdinalIgnoreCase))
+                {
+                    rawFreights = entry.Value;
+                    break;
+                }
+            }
+
+            IEnumerable exportedFreights = rawFreights as IEnumerable;
+            if (exportedFreights == null)
+            {
+                return true;
+            }
+
+            harborDataKnown = true;
+            foreach (object rawFreight in exportedFreights)
+            {
+                string freight = rawFreight == null ? string.Empty : rawFreight.ToString();
+                if (ContainsIgnoreCase(upgradeFreights, freight))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private double ScoreUpgradeCandidate(ShipSnapshot ship, string harborName, int upgradeId, long estimatedCost)
+        {
+            double score = GetBaseUpgradeUtility(upgradeId) - (estimatedCost * 0.02);
+            if (IsFreightUpgrade(upgradeId))
+            {
+                score += EstimateFreightUpgradeOpportunity(ship, harborName, upgradeId);
+            }
+
+            return score;
+        }
+
+        private static double GetBaseUpgradeUtility(int upgradeId)
+        {
+            switch (upgradeId)
+            {
+                case 4:
+                    return 4500000.0;
+                case 1:
+                    return 4000000.0;
+                case 5:
+                    return 3500000.0;
+                case 2:
+                    return 2500000.0;
+                case 3:
+                    return 1800000.0;
+                case 6:
+                    return 1500000.0;
+                default:
+                    return IsFreightUpgrade(upgradeId) ? 3000000.0 : 0.0;
+            }
+        }
+
+        private double EstimateFreightUpgradeOpportunity(ShipSnapshot ship, string harborName, int upgradeId)
+        {
+            string[] freights = GetUpgradeFreights(upgradeId);
+            if (freights.Length == 0)
+            {
+                return 0.0;
+            }
+
+            int contrabandSkipped = 0;
+            int candidateCount = 0;
+            Dictionary<string, List<JobCandidate>> candidatesByDestination = CollectJobCandidatesFromHarbor(ship, harborName, out contrabandSkipped, out candidateCount);
+            if (candidatesByDestination == null)
+            {
+                return 0.0;
+            }
+
+            double opportunity = 0.0;
+            foreach (KeyValuePair<string, List<JobCandidate>> pair in candidatesByDestination)
+            {
+                List<JobCandidate> candidates = pair.Value;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    JobCandidate candidate = candidates[i];
+                    if (ContainsIgnoreCase(freights, candidate.Freight))
+                    {
+                        opportunity += candidate.Score * 0.5;
+                    }
+                }
+            }
+
+            return opportunity;
+        }
+
+        private int GetRegionOfHarbor(string harborName)
+        {
+            if (getRegionOfHarborMethod == null || string.IsNullOrEmpty(harborName))
+            {
+                return 0;
+            }
+
+            try
+            {
+                return ToInt(getRegionOfHarborMethod.Invoke(staticSqLite, new object[] { harborName }));
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private int GetUpgradeDockOwner(int region)
+        {
+            if (getUpgradeDockOwnerMethod == null || region <= 0)
+            {
+                return 0;
+            }
+
+            try
+            {
+                return ToInt(getUpgradeDockOwnerMethod.Invoke(shipFactory, new object[] { region }));
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private long EstimateUpgradeDockOwnerShares(int region, long upgradeCost)
+        {
+            if (getBusinessSharesFromRegionMethod == null || region <= 0 || upgradeCost <= 0L)
+            {
+                return 0L;
+            }
+
+            try
+            {
+                object shares = getBusinessSharesFromRegionMethod.Invoke(staticSqLite, new object[] { region });
+                float percent = ReadFloat(shares, "UpgradeDockPercent");
+                return percent <= 0f ? 0L : (long)(upgradeCost * percent);
+            }
+            catch
+            {
+                return 0L;
+            }
+        }
+
         private JobPlan FindBestJobPlan(ShipSnapshot ship)
         {
             return FindBestJobPlanFromHarbor(ship, ship.CurrentHarbor, true);
@@ -1065,57 +1757,12 @@ namespace TransOcean2FleetAutomation.Direct
 
         private JobPlan FindBestJobPlanFromHarbor(ShipSnapshot ship, string startHarbor, bool includeChainOpportunity)
         {
-            if (getJobsFromStartHarborMethod == null || string.IsNullOrEmpty(startHarbor) || startHarbor == "None")
-            {
-                return null;
-            }
-
-            object rawJobs = null;
-            try
-            {
-                rawJobs = getJobsFromStartHarborMethod.Invoke(
-                    dsqLite,
-                    new object[] { startHarbor, ship.FreightType, ship.Class });
-            }
-            catch (Exception ex)
-            {
-                AddDecisionLog("Job lookup failed for " + ship.Name + " at " + startHarbor + ": " + UnwrapMessage(ex));
-                return null;
-            }
-
-            IEnumerable jobs = rawJobs as IEnumerable;
-            if (jobs == null)
-            {
-                return null;
-            }
-
-            Dictionary<string, List<JobCandidate>> candidatesByDestination = new Dictionary<string, List<JobCandidate>>(StringComparer.OrdinalIgnoreCase);
             int contrabandSkipped = 0;
             int candidateCount = 0;
-            foreach (object rawJob in jobs)
+            Dictionary<string, List<JobCandidate>> candidatesByDestination = CollectJobCandidatesFromHarbor(ship, startHarbor, out contrabandSkipped, out candidateCount);
+            if (candidatesByDestination == null)
             {
-                bool isContraband = IsContrabandJob(rawJob);
-                if (isContraband && !allowContrabandCargo)
-                {
-                    contrabandSkipped++;
-                    continue;
-                }
-
-                JobCandidate candidate = JobCandidate.From(rawJob, ship, isContraband);
-                if (candidate == null)
-                {
-                    continue;
-                }
-
-                candidateCount++;
-                List<JobCandidate> destinationCandidates;
-                if (!candidatesByDestination.TryGetValue(candidate.End, out destinationCandidates))
-                {
-                    destinationCandidates = new List<JobCandidate>();
-                    candidatesByDestination[candidate.End] = destinationCandidates;
-                }
-
-                destinationCandidates.Add(candidate);
+                return null;
             }
 
             JobPlan best = null;
@@ -1145,6 +1792,91 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return best;
+        }
+
+        private JobPlan FindJobPlanToDestination(ShipSnapshot ship, string startHarbor, string destination)
+        {
+            int contrabandSkipped = 0;
+            int candidateCount = 0;
+            Dictionary<string, List<JobCandidate>> candidatesByDestination = CollectJobCandidatesFromHarbor(ship, startHarbor, out contrabandSkipped, out candidateCount);
+            if (candidatesByDestination == null)
+            {
+                return null;
+            }
+
+            List<JobCandidate> candidates;
+            if (!candidatesByDestination.TryGetValue(destination, out candidates))
+            {
+                return null;
+            }
+
+            JobPlan plan = BuildJobPlanForDestination(ship, startHarbor, destination, candidates);
+            if (plan != null)
+            {
+                plan.ContrabandSkipped = contrabandSkipped;
+                plan.CandidateCount = candidateCount;
+            }
+
+            return plan;
+        }
+
+        private Dictionary<string, List<JobCandidate>> CollectJobCandidatesFromHarbor(ShipSnapshot ship, string startHarbor, out int contrabandSkipped, out int candidateCount)
+        {
+            contrabandSkipped = 0;
+            candidateCount = 0;
+
+            if (getJobsFromStartHarborMethod == null || string.IsNullOrEmpty(startHarbor) || startHarbor == "None")
+            {
+                return null;
+            }
+
+            object rawJobs = null;
+            try
+            {
+                rawJobs = getJobsFromStartHarborMethod.Invoke(
+                    dsqLite,
+                    new object[] { startHarbor, ship.FreightType, ship.Class });
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog("Job lookup failed for " + ship.Name + " at " + startHarbor + ": " + UnwrapMessage(ex));
+                return null;
+            }
+
+            IEnumerable jobs = rawJobs as IEnumerable;
+            if (jobs == null)
+            {
+                return null;
+            }
+
+            Dictionary<string, List<JobCandidate>> candidatesByDestination = new Dictionary<string, List<JobCandidate>>(StringComparer.OrdinalIgnoreCase);
+            foreach (object rawJob in jobs)
+            {
+                bool isContraband = IsContrabandJob(rawJob);
+                if (isContraband && !allowContrabandCargo)
+                {
+                    contrabandSkipped++;
+                    continue;
+                }
+
+                JobCandidate candidate = JobCandidate.From(rawJob, ship, isContraband);
+                if (candidate == null)
+                {
+                    continue;
+                }
+
+                candidateCount++;
+                List<JobCandidate> destinationCandidates;
+                if (!candidatesByDestination.TryGetValue(candidate.End, out destinationCandidates))
+                {
+                    destinationCandidates = new List<JobCandidate>();
+                    candidatesByDestination[candidate.End] = destinationCandidates;
+                }
+
+                destinationCandidates.Add(candidate);
+            }
+
+            return candidatesByDestination;
         }
 
         private void AddChainOpportunity(ShipSnapshot ship, JobPlan plan)
@@ -1227,6 +1959,7 @@ namespace TransOcean2FleetAutomation.Direct
 
             try
             {
+                SetNativeAiState(ship, false);
                 for (int i = 0; i < plan.Jobs.Count; i++)
                 {
                     updateJobPlayerShipMethod.Invoke(dsqLite, new object[] { plan.Jobs[i].JobId, ship.PlayerShipId });
@@ -1234,22 +1967,39 @@ namespace TransOcean2FleetAutomation.Direct
                 }
 
                 SetNativeCargoGuard(ship, true, plan.End);
+                SetNativeDestinationHarbor(ship, plan.End);
                 if (setShipSmugglersWareMethod != null)
                 {
                     setShipSmugglersWareMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId, plan.HasContraband });
                     WriteField(ship.RawShip, "HasSmugglerswareLoaded", plan.HasContraband);
                 }
 
-                bool sent = SendCargoEvent("SHIP_CAST_IN_DONE", ship.PlayerShipId);
-                if (!sent && sendShipToDestinationMethod != null)
+                bool sent = false;
+                if (sendShipToDestinationMethod != null)
                 {
-                    sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, plan.End });
-                    sent = true;
+                    try
+                    {
+                        sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, plan.End });
+                        sent = true;
+                    }
+                    catch (Exception moveEx)
+                    {
+                        AddDecisionLog(string.Format(
+                            "#{0} {1}: direct movement call failed; trying native cast-out event: {2}",
+                            ship.PlayerShipId,
+                            ship.Name,
+                            UnwrapMessage(moveEx)));
+                    }
+                }
+                if (!sent)
+                {
+                    sent = SendCargoEvent("SHIP_CAST_IN_DONE", ship.PlayerShipId);
                 }
 
                 if (sent)
                 {
                     ship.DestinationHarbor = plan.End;
+                    MarkShipDispatched(ship);
                     AddDecisionLog(string.Format(
                         "#{0} {1}: loaded {2} {3}job(s) for {4} and dispatched from {5}.",
                         ship.PlayerShipId,
@@ -1273,7 +2023,7 @@ namespace TransOcean2FleetAutomation.Direct
 
         private bool IsShipIdleInHarbor(ShipSnapshot ship)
         {
-            if (IsRepairPending(ship))
+            if (IsRepairPending(ship) || IsUpgradePending(ship))
             {
                 return false;
             }
@@ -1307,6 +2057,36 @@ namespace TransOcean2FleetAutomation.Direct
                 && ship.DestinationHarbor != ship.CurrentHarbor;
         }
 
+        private bool IsDispatchSettling(ShipSnapshot ship)
+        {
+            if (ship == null)
+            {
+                return false;
+            }
+
+            float lastDispatch;
+            if (!lastDispatchRealtimeByShipId.TryGetValue(ship.PlayerShipId, out lastDispatch))
+            {
+                return false;
+            }
+
+            if (Time.realtimeSinceStartup - lastDispatch <= DispatchSettleSeconds)
+            {
+                return true;
+            }
+
+            lastDispatchRealtimeByShipId.Remove(ship.PlayerShipId);
+            return false;
+        }
+
+        private void MarkShipDispatched(ShipSnapshot ship)
+        {
+            if (ship != null)
+            {
+                lastDispatchRealtimeByShipId[ship.PlayerShipId] = Time.realtimeSinceStartup;
+            }
+        }
+
         private static bool IsNoneOrEmpty(string value)
         {
             return string.IsNullOrEmpty(value) || value == "None";
@@ -1335,6 +2115,21 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return ship.RepairFinish > GetCurrentGameDateTime();
+        }
+
+        private bool IsUpgradePending(ShipSnapshot ship)
+        {
+            if (ship == null || ship.Upgraded)
+            {
+                return false;
+            }
+
+            if (ship.UpgradeFinish <= DateTime.MinValue.AddDays(1.0))
+            {
+                return false;
+            }
+
+            return ship.UpgradeFinish > GetCurrentGameDateTime();
         }
 
         private DateTime GetCurrentGameDateTime()
@@ -1367,6 +2162,16 @@ namespace TransOcean2FleetAutomation.Direct
             if (IsHeadingToRepairDock(ship))
             {
                 return "To repair";
+            }
+
+            if (IsUpgradePending(ship))
+            {
+                return "Upgrading";
+            }
+
+            if (IsHeadingToUpgradeDock(ship))
+            {
+                return "To upgrade";
             }
 
             return ship.Status;
@@ -1463,6 +2268,27 @@ namespace TransOcean2FleetAutomation.Direct
             }
         }
 
+        private bool SetNativeDestinationHarbor(ShipSnapshot ship, string destination)
+        {
+            if (updatePlayerShipDestinationHarborMethod == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                updatePlayerShipDestinationHarborMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId, destination });
+                WriteField(ship.RawShip, "DestinationHarbor", destination);
+                ship.DestinationHarbor = destination;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(string.Format("#{0} {1}: failed to set native destination harbor: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
+                return false;
+            }
+        }
+
         private void ClearNativeCargoGuard(ShipSnapshot ship)
         {
             SetNativeCargoGuard(ship, false, "None");
@@ -1553,6 +2379,29 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return false;
+        }
+
+        private void WarnForMissingEnabledShips(Dictionary<int, bool> visibleShipIds)
+        {
+            foreach (KeyValuePair<int, bool> pair in captainEnabledByShipId)
+            {
+                if (!pair.Value || visibleShipIds.ContainsKey(pair.Key) || missingShipWarnedByShipId.ContainsKey(pair.Key))
+                {
+                    continue;
+                }
+
+                string name;
+                if (!lastSeenShipNameById.TryGetValue(pair.Key, out name) || string.IsNullOrEmpty(name))
+                {
+                    name = "unknown";
+                }
+
+                missingShipWarnedByShipId[pair.Key] = true;
+                AddDecisionLog(string.Format(
+                    "#{0} {1}: enabled ship is missing from the native player ship list; native game state may have removed it.",
+                    pair.Key,
+                    name));
+            }
         }
 
         private bool IsCaptainEnabled(int playerShipId)
@@ -1670,6 +2519,34 @@ namespace TransOcean2FleetAutomation.Direct
             return value.Substring(0, maxChars - 3) + "...";
         }
 
+        private static string Capitalize(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            return value.Substring(0, 1).ToUpperInvariant() + value.Substring(1);
+        }
+
+        private static bool ContainsIgnoreCase(string[] values, string value)
+        {
+            if (values == null || string.IsNullOrEmpty(value))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < values.Length; i++)
+            {
+                if (string.Equals(values[i], value, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static string UnwrapMessage(Exception ex)
         {
             TargetInvocationException targetInvocation = ex as TargetInvocationException;
@@ -1688,7 +2565,7 @@ namespace TransOcean2FleetAutomation.Direct
                 return null;
             }
 
-            FieldInfo field = instance.GetType().GetField(fieldName, BindingFlags.Public | BindingFlags.Instance);
+            FieldInfo field = FindField(instance.GetType(), fieldName);
             return field == null ? null : field.GetValue(instance);
         }
 
@@ -1699,11 +2576,27 @@ namespace TransOcean2FleetAutomation.Direct
                 return;
             }
 
-            FieldInfo field = instance.GetType().GetField(fieldName, BindingFlags.Public | BindingFlags.Instance);
+            FieldInfo field = FindField(instance.GetType(), fieldName);
             if (field != null)
             {
                 field.SetValue(instance, value);
             }
+        }
+
+        private static FieldInfo FindField(Type type, string fieldName)
+        {
+            while (type != null)
+            {
+                FieldInfo field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field != null)
+                {
+                    return field;
+                }
+
+                type = type.BaseType;
+            }
+
+            return null;
         }
 
         private static string ReadString(object instance, string fieldName)
@@ -1825,8 +2718,14 @@ namespace TransOcean2FleetAutomation.Direct
             public string Status;
             public bool IsAI;
             public DateTime RepairFinish;
+            public DateTime UpgradeFinish;
             public bool Repaired;
+            public bool Upgraded;
+            public int Upgrade1;
+            public int Upgrade2;
             public int Upgrade3;
+            public int Upgrade4;
+            public int Upgrade5;
             public object RawShip;
 
             public static ShipSnapshot From(object rawShip)
@@ -1846,9 +2745,87 @@ namespace TransOcean2FleetAutomation.Direct
                 snapshot.Status = ReadString(rawShip, "Status");
                 snapshot.IsAI = ReadBool(rawShip, "IsAI");
                 snapshot.RepairFinish = ReadDateTime(rawShip, "RepairFinish");
+                snapshot.UpgradeFinish = ReadDateTime(rawShip, "UpgradeFinish");
                 snapshot.Repaired = ReadBool(rawShip, "Repaired");
+                snapshot.Upgraded = ReadBool(rawShip, "Upgraded");
+                snapshot.Upgrade1 = ReadInt(rawShip, "Upgrade1");
+                snapshot.Upgrade2 = ReadInt(rawShip, "Upgrade2");
                 snapshot.Upgrade3 = ReadInt(rawShip, "Upgrade3");
+                snapshot.Upgrade4 = ReadInt(rawShip, "Upgrade4");
+                snapshot.Upgrade5 = ReadInt(rawShip, "Upgrade5");
                 return snapshot;
+            }
+
+            public int GetUpgrade(int slot)
+            {
+                switch (slot)
+                {
+                    case 1:
+                        return Upgrade1;
+                    case 2:
+                        return Upgrade2;
+                    case 3:
+                        return Upgrade3;
+                    case 4:
+                        return Upgrade4;
+                    case 5:
+                        return Upgrade5;
+                    default:
+                        return 0;
+                }
+            }
+
+            public int UpgradeCount()
+            {
+                int count = 0;
+                if (Upgrade1 != 0)
+                {
+                    count++;
+                }
+
+                if (Upgrade2 != 0)
+                {
+                    count++;
+                }
+
+                if (Upgrade3 != 0)
+                {
+                    count++;
+                }
+
+                if (Upgrade4 != 0)
+                {
+                    count++;
+                }
+
+                if (Upgrade5 != 0)
+                {
+                    count++;
+                }
+
+                return count;
+            }
+
+            public void SetUpgrade(int slot, int upgradeId)
+            {
+                switch (slot)
+                {
+                    case 1:
+                        Upgrade1 = upgradeId;
+                        break;
+                    case 2:
+                        Upgrade2 = upgradeId;
+                        break;
+                    case 3:
+                        Upgrade3 = upgradeId;
+                        break;
+                    case 4:
+                        Upgrade4 = upgradeId;
+                        break;
+                    case 5:
+                        Upgrade5 = upgradeId;
+                        break;
+                }
             }
         }
 
@@ -1869,6 +2846,28 @@ namespace TransOcean2FleetAutomation.Direct
             public string Harbor;
             public float Distance;
             public float ArrivalCondition;
+        }
+
+        private sealed class UpgradePlan
+        {
+            public bool CanStart;
+            public string Harbor;
+            public int UpgradeId;
+            public int Slot;
+            public string Name;
+            public int Region;
+            public int UpgradeDockOwner;
+            public long UpgradeDockOwnerShares;
+            public long EstimatedCost;
+            public double Score;
+        }
+
+        private sealed class UpgradeDockCandidate
+        {
+            public string Harbor;
+            public float Distance;
+            public float ArrivalCondition;
+            public UpgradePlan Plan;
         }
 
         private sealed class JobPlan

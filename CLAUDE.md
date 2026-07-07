@@ -45,6 +45,8 @@ Build only:
 
 Ships below the sail threshold are held for maintenance, routed to safe reachable repair docks, or repaired when already in a repair-capable harbor.
 
+Repair and upgrade repositioning tries to pay for itself: before sending a ship to the chosen service port, the mod looks for legal same-destination jobs ending at that repair/upgrade harbor. If matching cargo fits, it dispatches with those jobs attached; otherwise it deadheads to the service port.
+
 Cargo automation is intended to:
 
 1. Find available jobs from the current harbor.
@@ -54,9 +56,25 @@ Cargo automation is intended to:
 5. Add a discounted one-hop chain opportunity bonus for destinations whose arrival harbor has another strong legal bundle available.
 6. Attach immediate-destination jobs directly via `DynamicSQLiteController.UpdatePlayerShipIDFromJob`.
 7. Set `DontLoadJobs` so native AI does not add blocked cargo.
-8. Dispatch with the native cast-out/movement path.
+8. Keep native `IsAI` off, write `DestinationHarbor`, and dispatch with `ShipFactory.SendShipToDestination` when available.
+9. Use the native cast-out event only as a fallback if the direct movement bridge is unavailable.
+
+After any dispatch or service-dock routing, the mod applies a short per-ship settle cooldown before it will issue another action for that ship. This is meant to avoid double-dispatching while the native database is still updating harbor and destination fields.
+
+If an enabled ship disappears from `GetALLPlayerShips`, the next active fleet refresh logs `enabled ship is missing from the native player ship list`. The July 2026 short run showed `#1976 Skaald` drop out this way after native logs said `GetPlayerIDFromPlayerShip - PlayerShip in playerShips database not found. PlayerShipID: 1976`; an earlier run showed the same signature for `#3201 Lorken`.
 
 The chain scoring is intentionally advisory. It does not accept future-harbor jobs early and it does not mix cargo for multiple destinations into one native route. It only nudges the first destination toward harbors with better follow-on work, then lets the next automation tick re-evaluate after arrival.
+
+Upgrade automation is now experimental but active behind the panel's `Auto upgrades` toggle.
+
+- Repairs still have priority.
+- Upgrade work is only considered for idle enabled ships that are at the fleet's current lowest installed-upgrade count.
+- This low-water-mark rule prevents one ship in a large fleet from consuming all upgrade turns while other enabled ships have fewer upgrades.
+- If the ship is already at a real upgrade dock and an affordable candidate exists, the mod calls the native `ShipFactory.UpgradePlayerShip(...)`.
+- If it needs to travel, the mod chooses a reachable safe upgrade dock with an affordable candidate and tries to carry legal cargo to that exact dock first.
+- If no upgrades are left, the ship is above the fleet upgrade low-water mark, or spendable treasury after reserve is too low, the ship falls through to normal contract automation.
+- Upgrade reserve is currently `max(1,500,000, treasury / 3)`.
+- Upgrade selection prefers freight-specific revenue upgrades when harbor/export/job data supports them, then fuel consumption, speed, waypoint, repair-duration, tug-fee, and range upgrades.
 
 ## Recent Contract Bug
 
@@ -83,7 +101,7 @@ If it still does not visibly accept contracts, inspect whether `UpdatePlayerShip
 
 ## Upgrade API Findings
 
-Auto-upgrade automation is feasible but not enabled yet.
+Auto-upgrade automation uses the native upgrade bridge, but should still be treated as experimental until more live runs confirm the economy behavior.
 
 Relevant native methods and fields:
 
@@ -103,13 +121,12 @@ Upgrade templates live under `Cargo.ShipUpgrades`:
 - ID 1 increases speed, ID 2 shortens repair duration, ID 3 lowers tug fees, ID 4 lowers fuel consumption, ID 5 enables waypoint behavior used by `HasWaypointUpgrade`, and ID 6 extends distance/range.
 - IDs 7-15 are freight-specific export/revenue upgrades. Base price is 500,000. Container IDs 7-9, bulk IDs 10-12, tank IDs 13-15. Their `Freights` list determines which cargo types get the factor bonus.
 
-Suggested first auto-upgrade policy:
+Current policy:
 
-- Add an `Auto upgrades` toggle defaulting off.
-- Only consider enabled ships that are idle in a harbor with `UpgradeDock`, above maintenance threshold, not repairing/upgrading, and with treasury above a larger reserve.
-- Prefer cheap freight-specific upgrades matching the ship freight type and recent/high-value cargo, then fuel/speed/waypoint upgrades for larger classes.
-- Use `GetUpgradeDockOwner(region)` plus the native `UpgradePlayerShip` path rather than direct database writes.
-- Log the chosen upgrade ID, slot, estimated price, and days before spending credits.
+- `Auto upgrades` defaults on for testing and can be toggled in the panel.
+- Only considers enabled ships that are idle, above maintenance threshold, not repairing/upgrading, and not ahead of the enabled fleet's minimum upgrade count.
+- Uses `GetUpgradeDockOwner(region)` plus the native `UpgradePlayerShip` path rather than direct database writes.
+- Logs the chosen upgrade ID, slot, and estimated base price when spending credits.
 
 ## Useful Logs
 
@@ -122,7 +139,7 @@ C:\Program Files (x86)\Steam\steamapps\common\TransOcean2\TransOcean2_Data\outpu
 Useful search pattern:
 
 ```powershell
-Select-String -Path 'C:\Program Files (x86)\Steam\steamapps\common\TransOcean2\TransOcean2_Data\output_log.txt' -Pattern '\[TO2FA\.Direct\]|best route|loaded .*job|no matching|direct dispatch|Exception|Error|failed' -CaseSensitive:$false
+Select-String -Path 'C:\Program Files (x86)\Steam\steamapps\common\TransOcean2\TransOcean2_Data\output_log.txt' -Pattern '\[TO2FA\.Direct\]|best route|loaded .*job|missing from the native player ship list|playerShips database not found|no matching|direct dispatch|Exception|Error|failed' -CaseSensitive:$false
 ```
 
 ## Safety Notes
