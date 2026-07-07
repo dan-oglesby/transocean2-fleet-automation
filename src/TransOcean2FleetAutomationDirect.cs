@@ -32,6 +32,10 @@ namespace TransOcean2FleetAutomation.Direct
         private const string CaptainPrefsPrefix = "TO2FA.Captain.";
         private const double ChainOpportunityWeight = 0.35;
         private const float DispatchSettleSeconds = 20f;
+        private const float PanelMaxWidth = 1180f;
+        private const float PanelMaxHeight = 820f;
+        private const float ControlHeight = 30f;
+        private const float ShipRowHeight = 28f;
 
         private static readonly string[] KnownContrabandFreights = new string[]
         {
@@ -174,15 +178,17 @@ namespace TransOcean2FleetAutomation.Direct
                 return;
             }
 
-            float width = Mathf.Min(880f, Screen.width - 24f);
-            float height = Mathf.Min(680f, Screen.height - 24f);
-            GUILayout.BeginArea(new Rect(12f, 12f, width, height), "TO2 Fleet Captain", GUI.skin.window);
+            float width = Mathf.Min(PanelMaxWidth, Mathf.Max(320f, Screen.width - 32f));
+            float height = Mathf.Min(PanelMaxHeight, Mathf.Max(360f, Screen.height - 48f));
+            float left = Mathf.Max(8f, (Screen.width - width) * 0.5f);
+            float top = Mathf.Max(8f, (Screen.height - height) * 0.5f);
+            GUILayout.BeginArea(new Rect(left, top, width, height), "TO2 Fleet Captain", GUI.skin.window);
 
             GUILayout.Label(statusText);
             GUILayout.Label(string.Format("Player {0} treasury: {1:n0}", playerId, playerCredits));
 
             GUILayout.BeginHorizontal();
-            bool newLiveActions = GUILayout.Toggle(liveActions, "Live actions", GUILayout.Width(125f));
+            bool newLiveActions = GUILayout.Toggle(liveActions, "Live actions", GUILayout.Width(150f), GUILayout.Height(ControlHeight));
             if (newLiveActions != liveActions)
             {
                 liveActions = newLiveActions;
@@ -192,7 +198,7 @@ namespace TransOcean2FleetAutomation.Direct
                 SyncNativeAiStateForEnabledShips(liveActions);
             }
 
-            bool newAutoRepairs = GUILayout.Toggle(autoRepairs, "Auto repairs", GUILayout.Width(120f));
+            bool newAutoRepairs = GUILayout.Toggle(autoRepairs, "Auto repairs", GUILayout.Width(145f), GUILayout.Height(ControlHeight));
             if (newAutoRepairs != autoRepairs)
             {
                 autoRepairs = newAutoRepairs;
@@ -201,7 +207,7 @@ namespace TransOcean2FleetAutomation.Direct
                 AddDecisionLog("Auto repairs " + (autoRepairs ? "enabled." : "disabled."));
             }
 
-            bool newAutoUpgrades = GUILayout.Toggle(autoUpgrades, "Auto upgrades", GUILayout.Width(130f));
+            bool newAutoUpgrades = GUILayout.Toggle(autoUpgrades, "Auto upgrades", GUILayout.Width(155f), GUILayout.Height(ControlHeight));
             if (newAutoUpgrades != autoUpgrades)
             {
                 autoUpgrades = newAutoUpgrades;
@@ -210,7 +216,7 @@ namespace TransOcean2FleetAutomation.Direct
                 AddDecisionLog("Auto upgrades " + (autoUpgrades ? "enabled." : "disabled."));
             }
 
-            bool newAllowContrabandCargo = GUILayout.Toggle(allowContrabandCargo, "Allow contraband", GUILayout.Width(145f));
+            bool newAllowContrabandCargo = GUILayout.Toggle(allowContrabandCargo, "Allow contraband", GUILayout.Width(170f), GUILayout.Height(ControlHeight));
             if (newAllowContrabandCargo != allowContrabandCargo)
             {
                 allowContrabandCargo = newAllowContrabandCargo;
@@ -222,8 +228,10 @@ namespace TransOcean2FleetAutomation.Direct
                     SyncNativeAiStateForEnabledShips(true);
                 }
             }
+            GUILayout.EndHorizontal();
 
-            bool newTick = GUILayout.Toggle(evaluateEnabledShipsEveryTick, "Evaluate every 30s", GUILayout.Width(180f));
+            GUILayout.BeginHorizontal();
+            bool newTick = GUILayout.Toggle(evaluateEnabledShipsEveryTick, "Evaluate every 30s", GUILayout.Width(190f), GUILayout.Height(ControlHeight));
             if (newTick != evaluateEnabledShipsEveryTick)
             {
                 evaluateEnabledShipsEveryTick = newTick;
@@ -231,30 +239,31 @@ namespace TransOcean2FleetAutomation.Direct
                 PlayerPrefs.Save();
             }
 
-            if (GUILayout.Button("Refresh", GUILayout.Width(90f)))
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("Refresh", GUILayout.Width(115f), GUILayout.Height(ControlHeight)))
             {
                 RefreshFleet(true);
             }
 
-            if (GUILayout.Button("Run", GUILayout.Width(100f)))
+            if (GUILayout.Button("Run", GUILayout.Width(105f), GUILayout.Height(ControlHeight)))
             {
                 EvaluateEnabledShips("panel button");
             }
 
-            if (GUILayout.Button("Enable all", GUILayout.Width(100f)))
+            if (GUILayout.Button("Enable all", GUILayout.Width(125f), GUILayout.Height(ControlHeight)))
             {
                 SetAllVisibleShips(true);
             }
 
-            if (GUILayout.Button("Disable all", GUILayout.Width(105f)))
+            if (GUILayout.Button("Disable all", GUILayout.Width(130f), GUILayout.Height(ControlHeight)))
             {
                 SetAllVisibleShips(false);
             }
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label(string.Format("Minimum condition to sail: {0:0}%", minimumSailCondition), GUILayout.Width(235f));
-            float newMinimumSailCondition = GUILayout.HorizontalSlider(minimumSailCondition, 50f, 100f, GUILayout.Width(240f));
+            GUILayout.Label(string.Format("Minimum condition to sail: {0:0}%", minimumSailCondition), GUILayout.Width(265f));
+            float newMinimumSailCondition = GUILayout.HorizontalSlider(minimumSailCondition, 50f, 100f, GUILayout.MinWidth(260f), GUILayout.ExpandWidth(true));
             newMinimumSailCondition = Mathf.Round(newMinimumSailCondition);
             if (Mathf.Abs(newMinimumSailCondition - minimumSailCondition) > 0.1f)
             {
@@ -263,37 +272,37 @@ namespace TransOcean2FleetAutomation.Direct
                 PlayerPrefs.Save();
                 AddDecisionLog(string.Format("Minimum condition to sail set to {0:0}%.", minimumSailCondition));
             }
-            if (GUILayout.Button("85%", GUILayout.Width(55f)))
+            if (GUILayout.Button("85%", GUILayout.Width(65f), GUILayout.Height(ControlHeight)))
             {
                 SetMinimumSailCondition(85f);
             }
-            if (GUILayout.Button("90%", GUILayout.Width(55f)))
+            if (GUILayout.Button("90%", GUILayout.Width(65f), GUILayout.Height(ControlHeight)))
             {
                 SetMinimumSailCondition(90f);
             }
-            if (GUILayout.Button("95%", GUILayout.Width(55f)))
+            if (GUILayout.Button("95%", GUILayout.Width(65f), GUILayout.Height(ControlHeight)))
             {
                 SetMinimumSailCondition(95f);
             }
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label(string.Format("Repair target condition: {0:0}%", repairTargetCondition), GUILayout.Width(235f));
-            float newRepairTargetCondition = GUILayout.HorizontalSlider(repairTargetCondition, minimumSailCondition, 100f, GUILayout.Width(240f));
+            GUILayout.Label(string.Format("Repair target condition: {0:0}%", repairTargetCondition), GUILayout.Width(265f));
+            float newRepairTargetCondition = GUILayout.HorizontalSlider(repairTargetCondition, minimumSailCondition, 100f, GUILayout.MinWidth(260f), GUILayout.ExpandWidth(true));
             newRepairTargetCondition = Mathf.Round(newRepairTargetCondition);
             if (Mathf.Abs(newRepairTargetCondition - repairTargetCondition) > 0.1f)
             {
                 SetRepairTargetCondition(newRepairTargetCondition);
             }
-            if (GUILayout.Button("90%", GUILayout.Width(55f)))
+            if (GUILayout.Button("90%", GUILayout.Width(65f), GUILayout.Height(ControlHeight)))
             {
                 SetRepairTargetCondition(90f);
             }
-            if (GUILayout.Button("95%", GUILayout.Width(55f)))
+            if (GUILayout.Button("95%", GUILayout.Width(65f), GUILayout.Height(ControlHeight)))
             {
                 SetRepairTargetCondition(95f);
             }
-            if (GUILayout.Button("100%", GUILayout.Width(55f)))
+            if (GUILayout.Button("100%", GUILayout.Width(65f), GUILayout.Height(ControlHeight)))
             {
                 SetRepairTargetCondition(100f);
             }
@@ -301,17 +310,17 @@ namespace TransOcean2FleetAutomation.Direct
 
             GUILayout.Space(6f);
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Auto", GUILayout.Width(45f));
-            GUILayout.Label("Ship", GUILayout.Width(205f));
-            GUILayout.Label("Status", GUILayout.Width(95f));
-            GUILayout.Label("Harbor", GUILayout.Width(145f));
-            GUILayout.Label("Dest", GUILayout.Width(145f));
-            GUILayout.Label("Cond", GUILayout.Width(60f));
-            GUILayout.Label("Fuel", GUILayout.Width(60f));
-            GUILayout.Label("Plan", GUILayout.Width(60f));
+            GUILayout.Label("Auto", GUILayout.Width(70f));
+            GUILayout.Label("Ship", GUILayout.Width(285f));
+            GUILayout.Label("Status", GUILayout.Width(125f));
+            GUILayout.Label("Harbor", GUILayout.Width(185f));
+            GUILayout.Label("Dest", GUILayout.Width(185f));
+            GUILayout.Label("Cond", GUILayout.Width(75f));
+            GUILayout.Label("Fuel", GUILayout.Width(75f));
+            GUILayout.Label("Plan", GUILayout.Width(90f));
             GUILayout.EndHorizontal();
 
-            scroll = GUILayout.BeginScrollView(scroll, GUILayout.Height(Mathf.Max(180f, height * 0.45f)));
+            scroll = GUILayout.BeginScrollView(scroll, GUILayout.Height(Mathf.Max(220f, height * 0.40f)));
             for (int i = 0; i < ships.Count; i++)
             {
                 DrawShipRow(ships[i]);
@@ -319,7 +328,7 @@ namespace TransOcean2FleetAutomation.Direct
             GUILayout.EndScrollView();
 
             GUILayout.Label("Decision log");
-            logScroll = GUILayout.BeginScrollView(logScroll, GUILayout.Height(Mathf.Max(120f, height * 0.28f)));
+            logScroll = GUILayout.BeginScrollView(logScroll, GUILayout.Height(Mathf.Max(120f, height * 0.22f)));
             for (int i = 0; i < decisionLog.Count; i++)
             {
                 GUILayout.Label(decisionLog[i]);
@@ -344,20 +353,20 @@ namespace TransOcean2FleetAutomation.Direct
         {
             GUILayout.BeginHorizontal();
             bool enabled = IsCaptainEnabled(ship.PlayerShipId);
-            bool next = GUILayout.Toggle(enabled, string.Empty, GUILayout.Width(45f));
+            bool next = GUILayout.Toggle(enabled, enabled ? "On" : "Off", GUILayout.Width(70f), GUILayout.Height(ShipRowHeight));
             if (next != enabled)
             {
                 SetCaptainEnabled(ship.PlayerShipId, next);
             }
 
-            GUILayout.Label(TrimForUi("#" + ship.PlayerShipId + " " + ship.Name, 28), GUILayout.Width(205f));
-            GUILayout.Label(TrimForUi(GetDisplayStatus(ship), 13), GUILayout.Width(95f));
-            GUILayout.Label(TrimForUi(ship.CurrentHarbor, 18), GUILayout.Width(145f));
-            GUILayout.Label(TrimForUi(ship.DestinationHarbor, 18), GUILayout.Width(145f));
-            GUILayout.Label(string.Format("{0:0}%", ship.Condition), GUILayout.Width(60f));
-            GUILayout.Label(string.Format("{0:0}", ship.FuelLoaded), GUILayout.Width(60f));
+            GUILayout.Label(TrimForUi("#" + ship.PlayerShipId + " " + ship.Name, 36), GUILayout.Width(285f), GUILayout.Height(ShipRowHeight));
+            GUILayout.Label(TrimForUi(GetDisplayStatus(ship), 18), GUILayout.Width(125f), GUILayout.Height(ShipRowHeight));
+            GUILayout.Label(TrimForUi(ship.CurrentHarbor, 24), GUILayout.Width(185f), GUILayout.Height(ShipRowHeight));
+            GUILayout.Label(TrimForUi(ship.DestinationHarbor, 24), GUILayout.Width(185f), GUILayout.Height(ShipRowHeight));
+            GUILayout.Label(string.Format("{0:0}%", ship.Condition), GUILayout.Width(75f), GUILayout.Height(ShipRowHeight));
+            GUILayout.Label(string.Format("{0:0}", ship.FuelLoaded), GUILayout.Width(75f), GUILayout.Height(ShipRowHeight));
 
-            if (GUILayout.Button("Plan", GUILayout.Width(60f)))
+            if (GUILayout.Button("Plan", GUILayout.Width(90f), GUILayout.Height(ShipRowHeight)))
             {
                 EvaluateShip(ship, "single ship");
             }
