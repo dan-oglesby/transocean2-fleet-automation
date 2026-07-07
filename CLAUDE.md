@@ -15,7 +15,7 @@ The source repo intentionally lives outside Proton Drive.
 Handoff from the prior Codex session. That session's uncommitted work (game-speed-scaled automation tick + a sink-risk repair-travel floor) is still in the tree and was left intact. On top of it, this session added, all in `src/TransOcean2FleetAutomationDirect.cs`:
 
 1. **Repair threshold slider now spans 1%–99%** (was 50%–100%). Constants `MinSailConditionFloor`/`MinSailConditionCeiling`; `minimumSailCondition` clamp updated in `Awake` and `SetMinimumSailCondition`; slider relabeled "Repair threshold (min condition to sail)".
-2. **`Auto-pilot all: ON/OFF` master toggle** replacing the two enable/disable buttons; reflects `AreAllVisibleShipsEnabled()` and calls `RefreshFleet(true)` on change.
+2. **`Auto-pilot all + new: ON/OFF` master toggle** replacing the two enable/disable buttons; backed by the persisted `autoPilotAllShips` flag, calls `RefreshFleet(true)` on change, and **auto-enrolls newly-added ships** while on (`AutoEnrollNewShip`).
 3. **Near-opaque panel + click-through blocking** (`GetPanelBackgroundTexture`, `BlockClickThrough`).
 4. **Upgrade cushion is now `max(20M/ship, 200M total)`** (`GetUpgradeTreasuryCushion`, new const `UpgradeTreasuryFloorTotal`).
 5. **Idle-ship repositioning** (`TryRepositionIdleShip` / `FindBestRepositionHarbor` / `TryDeadheadToHarbor`, `Move idle ships to work` toggle + idle-days slider) so contraband-only / dried-up ports stop stranding the fleet.
@@ -61,7 +61,7 @@ Build only:
 
 - The panel now paints a near-opaque backing texture (`GetPanelBackgroundTexture`, alpha ~0.97) so the game world no longer bleeds through it.
 - `BlockClickThrough(panelRect)` consumes `MouseDown/MouseUp/MouseDrag/ScrollWheel` events that land inside the panel so clicks/scrolls do not fall through to the game view. This only stops IMGUI-level event propagation; it is best-effort against any uGUI/`EventSystem` raycasts the base game runs. If click-through is still observed on some controls, the next step is a full-screen invisible `GUI.Box` behind the panel or a native input-lock hook.
-- The old `Enable all` / `Disable all` buttons are replaced by a single **`Auto-pilot all: ON/OFF`** toggle. Its label reflects `AreAllVisibleShipsEnabled()`, and flipping it calls `SetAllVisibleShips(...)` then `RefreshFleet(true)` so the ship rows immediately reflect the change.
+- The old `Enable all` / `Disable all` buttons are replaced by a single **`Auto-pilot all + new: ON/OFF`** toggle backed by the persisted `autoPilotAllShips` flag (`TO2FA.AutoPilotAllShips`, default off). Flipping it persists the flag, calls `SetAllVisibleShips(...)`, then `RefreshFleet(true)`. While the flag is on, **newly-seen ships are auto-enrolled** in `RefreshFleet`: a ship with no `TO2FA.Captain.<id>` PlayerPref key (i.e. never explicitly toggled) is enabled via `AutoEnrollNewShip`, which sets the pref but defers evaluation to the next tick to avoid re-entrancy mid-refresh. Ships the player explicitly disabled keep a `0` pref key and are not re-enrolled.
 
 Ships below the sail threshold are held for maintenance, routed to safe reachable repair docks, or repaired when already in a repair-capable harbor. Repair routing derives the native sink-risk threshold by probing `Cargo.ShipFactory.GetShipSinkChance(playerID, condition)` and requires projected arrival condition to be at least 10% above that threshold.
 

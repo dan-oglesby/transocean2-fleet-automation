@@ -114,6 +114,7 @@ namespace TransOcean2FleetAutomation.Direct
         private bool evaluateEnabledShipsEveryTick = true;
         private bool allowContrabandCargo;
         private bool autoRepositionIdleShips = true;
+        private bool autoPilotAllShips;
         private bool gameSessionActive;
         private float minimumSailCondition = 85f;
         private float repairTargetCondition = 100f;
@@ -141,6 +142,7 @@ namespace TransOcean2FleetAutomation.Direct
             evaluateEnabledShipsEveryTick = PlayerPrefs.GetInt("TO2FA.TickEnabled", 1) == 1;
             allowContrabandCargo = PlayerPrefs.GetInt("TO2FA.AllowContrabandCargo", 0) == 1;
             autoRepositionIdleShips = PlayerPrefs.GetInt("TO2FA.AutoRepositionIdleShips", 1) == 1;
+            autoPilotAllShips = PlayerPrefs.GetInt("TO2FA.AutoPilotAllShips", 0) == 1;
             minimumSailCondition = PlayerPrefs.GetFloat("TO2FA.MinimumSailCondition", 85f);
             minimumSailCondition = Mathf.Round(Mathf.Clamp(minimumSailCondition, MinSailConditionFloor, MinSailConditionCeiling));
             repairTargetCondition = PlayerPrefs.GetFloat("TO2FA.RepairTargetCondition", 100f);
@@ -302,16 +304,19 @@ namespace TransOcean2FleetAutomation.Direct
                 EvaluateEnabledShips("panel button");
             }
 
-            bool allEnabled = AreAllVisibleShipsEnabled();
-            bool newAllEnabled = GUILayout.Toggle(
-                allEnabled,
-                allEnabled ? "Auto-pilot all: ON" : "Auto-pilot all: OFF",
+            bool newAutoPilotAll = GUILayout.Toggle(
+                autoPilotAllShips,
+                autoPilotAllShips ? "Auto-pilot all + new: ON" : "Auto-pilot all + new: OFF",
                 GUI.skin.button,
-                GUILayout.Width(190f),
+                GUILayout.Width(230f),
                 GUILayout.Height(ControlHeight));
-            if (newAllEnabled != allEnabled)
+            if (newAutoPilotAll != autoPilotAllShips)
             {
-                SetAllVisibleShips(newAllEnabled);
+                autoPilotAllShips = newAutoPilotAll;
+                PlayerPrefs.SetInt("TO2FA.AutoPilotAllShips", autoPilotAllShips ? 1 : 0);
+                PlayerPrefs.Save();
+                AddDecisionLog("Auto-pilot all ships (including new arrivals) " + (autoPilotAllShips ? "enabled." : "disabled."));
+                SetAllVisibleShips(autoPilotAllShips);
                 RefreshFleet(true);
             }
             GUILayout.EndHorizontal();
@@ -587,7 +592,12 @@ namespace TransOcean2FleetAutomation.Direct
                     {
                         ShipSnapshot ship = ShipSnapshot.From(rawShip);
                         ships.Add(ship);
+                        bool isNewShip = !PlayerPrefs.HasKey(CaptainPrefsPrefix + ship.PlayerShipId);
                         EnsureCaptainPreferenceLoaded(ship.PlayerShipId);
+                        if (isNewShip && autoPilotAllShips && !IsCaptainEnabled(ship.PlayerShipId))
+                        {
+                            AutoEnrollNewShip(ship);
+                        }
                         visibleShipIds[ship.PlayerShipId] = true;
                         lastSeenShipNameById[ship.PlayerShipId] = ship.Name;
                         if (missingShipWarnedByShipId.ContainsKey(ship.PlayerShipId))
@@ -2611,22 +2621,17 @@ namespace TransOcean2FleetAutomation.Direct
             AddDecisionLog((enabled ? "Enabled" : "Disabled") + " TO2 Captain mode for all visible ships.");
         }
 
-        private bool AreAllVisibleShipsEnabled()
+        // Enrolls a newly-seen ship without triggering an immediate evaluation mid-refresh; the next
+        // automation tick (or F8/Plan) picks it up like any other enabled ship.
+        private void AutoEnrollNewShip(ShipSnapshot ship)
         {
-            if (ships.Count == 0)
-            {
-                return false;
-            }
-
-            for (int i = 0; i < ships.Count; i++)
-            {
-                if (!IsCaptainEnabled(ships[i].PlayerShipId))
-                {
-                    return false;
-                }
-            }
-
-            return true;
+            captainEnabledByShipId[ship.PlayerShipId] = true;
+            PlayerPrefs.SetInt(CaptainPrefsPrefix + ship.PlayerShipId, 1);
+            PlayerPrefs.Save();
+            AddDecisionLog(string.Format(
+                "#{0} {1}: new ship auto-enrolled into TO2 Captain mode (auto-pilot all is on).",
+                ship.PlayerShipId,
+                ship.Name));
         }
 
         private void SyncNativeAiStateForEnabledShips(bool nativeAiEnabled)
