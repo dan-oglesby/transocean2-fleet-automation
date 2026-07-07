@@ -524,7 +524,7 @@ namespace TransOcean2FleetAutomation.Direct
             JobPlan bestPlan = FindBestJobPlan(ship);
             if (bestPlan == null)
             {
-                AddDecisionLog(prefix + "no matching " + (allowContrabandCargo ? string.Empty : "legal ") + "unreserved jobs found at " + ship.CurrentHarbor + ".");
+                AddDecisionLog(prefix + "no matching " + (allowContrabandCargo ? string.Empty : "legal ") + "available jobs found at " + ship.CurrentHarbor + ".");
             }
             else
             {
@@ -1890,7 +1890,8 @@ namespace TransOcean2FleetAutomation.Direct
                     return null;
                 }
 
-                if (ReadInt(rawJob, "PlayerShipID") != 0)
+                int playerShipId = ReadInt(rawJob, "PlayerShipID");
+                if (playerShipId != 0 && playerShipId != 1 && playerShipId != ship.PlayerShipId)
                 {
                     return null;
                 }
