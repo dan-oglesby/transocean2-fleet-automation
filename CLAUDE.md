@@ -107,11 +107,11 @@ The chain scoring is intentionally advisory. It does not accept future-harbor jo
 Upgrade automation is now experimental but active behind the panel's `Auto upgrades` toggle.
 
 - Repairs still have priority.
-- Upgrade work is only considered for idle enabled ships that are at the fleet's current lowest installed-upgrade count.
-- This low-water-mark rule prevents one ship in a large fleet from consuming all upgrade turns while other enabled ships have fewer upgrades.
+- Upgrade work is only considered for idle enabled ships that are no more than one upgrade ahead of the fleet's current lowest installed-upgrade count.
+- This low-water-mark plus one rule lets ships continue past their first upgrade while preventing one ship in a large fleet from consuming all upgrade turns.
 - If the ship is already at a real upgrade dock and an affordable candidate exists, the mod calls the native `ShipFactory.UpgradePlayerShip(...)`.
 - If it needs to travel, the mod chooses a reachable safe upgrade dock with an affordable candidate and tries to carry legal cargo to that exact dock first.
-- If no upgrades are left, the ship is above the fleet upgrade low-water mark, the fleet cushion has not been reached, or spendable treasury above that cushion is too low, the ship falls through to normal contract automation.
+- If no upgrades are left, the ship is more than one upgrade ahead of the fleet upgrade low-water mark, the fleet cushion has not been reached, or spendable treasury above that cushion is too low, the ship falls through to normal contract automation.
 - Upgrade reserve (`GetUpgradeTreasuryCushion`) is now `min(10,000,000 * visible ship count, 50,000,000)` — that is, **10M per ship for a small company, capped at 50M total**. Until treasury is above that reserve, automation only repairs and hauls cargo.
 - Upgrade selection prefers freight-specific revenue upgrades when harbor/export/job data supports them, then fuel consumption, speed, waypoint, repair-duration, tug-fee, and range upgrades.
 

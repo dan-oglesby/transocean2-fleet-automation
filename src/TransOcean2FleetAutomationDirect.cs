@@ -39,6 +39,7 @@ namespace TransOcean2FleetAutomation.Direct
         private const float ShipRowHeight = 28f;
         private const long UpgradeTreasuryCushionPerShip = 10000000L;
         private const long UpgradeTreasuryCapTotal = 50000000L;
+        private const int UpgradeFleetLeadAllowance = 1;
         private const float RepairTravelSafetyMarginPercent = 10f;
         private const float AutomationTickBaseRealtimeSeconds = 30f;
         private const float AutomationTickMinRealtimeSeconds = 2f;
@@ -1308,6 +1309,10 @@ namespace TransOcean2FleetAutomation.Direct
 
             if (!HasFleetUpgradeTurn(ship))
             {
+                AddDecisionLog(prefix + string.Format(
+                    "upgrade deferred for fleet balance; ship has {0} upgrade(s), fleet low-water mark allows up to {1}.",
+                    ship.UpgradeCount(),
+                    GetFleetUpgradeAllowedCount()));
                 return false;
             }
 
@@ -1330,6 +1335,11 @@ namespace TransOcean2FleetAutomation.Direct
 
         private bool HasFleetUpgradeTurn(ShipSnapshot ship)
         {
+            return ship.UpgradeCount() <= GetFleetUpgradeAllowedCount();
+        }
+
+        private int GetFleetUpgradeAllowedCount()
+        {
             int minimumUpgradeCount = int.MaxValue;
             for (int i = 0; i < ships.Count; i++)
             {
@@ -1344,10 +1354,10 @@ namespace TransOcean2FleetAutomation.Direct
 
             if (minimumUpgradeCount == int.MaxValue)
             {
-                return true;
+                return int.MaxValue;
             }
 
-            return ship.UpgradeCount() <= minimumUpgradeCount;
+            return minimumUpgradeCount + UpgradeFleetLeadAllowance;
         }
 
         private long GetUpgradeTreasuryCushion()
