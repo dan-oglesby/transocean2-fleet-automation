@@ -36,6 +36,7 @@ namespace TransOcean2FleetAutomation.Direct
         private const float PanelMaxHeight = 820f;
         private const float ControlHeight = 30f;
         private const float ShipRowHeight = 28f;
+        private const long UpgradeTreasuryCushionPerShip = 20000000L;
 
         private static readonly string[] KnownContrabandFreights = new string[]
         {
@@ -186,6 +187,11 @@ namespace TransOcean2FleetAutomation.Direct
 
             GUILayout.Label(statusText);
             GUILayout.Label(string.Format("Player {0} treasury: {1:n0}", playerId, playerCredits));
+            GUILayout.Label(string.Format(
+                "Upgrade cushion: {0:n0} / {1:n0} ({2:n0} per visible ship)",
+                playerCredits,
+                GetUpgradeTreasuryCushion(),
+                UpgradeTreasuryCushionPerShip));
 
             GUILayout.BeginHorizontal();
             bool newLiveActions = GUILayout.Toggle(liveActions, "Live actions", GUILayout.Width(150f), GUILayout.Height(ControlHeight));
@@ -546,7 +552,7 @@ namespace TransOcean2FleetAutomation.Direct
 
             string prefix = string.Format("#{0} {1}: ", ship.PlayerShipId, ship.Name);
             long reserve = Math.Max(500000L, Math.Abs(playerCredits) / 5L);
-            long upgradeReserve = Math.Max(1500000L, Math.Abs(playerCredits) / 3L);
+            long upgradeReserve = GetUpgradeTreasuryCushion();
 
             if (IsRepairPending(ship))
             {
@@ -967,6 +973,11 @@ namespace TransOcean2FleetAutomation.Direct
                 return false;
             }
 
+            if (!HasUpgradeTreasuryCushion())
+            {
+                return false;
+            }
+
             if (!HasFleetUpgradeTurn(ship))
             {
                 return false;
@@ -1009,6 +1020,16 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return ship.UpgradeCount() <= minimumUpgradeCount;
+        }
+
+        private long GetUpgradeTreasuryCushion()
+        {
+            return UpgradeTreasuryCushionPerShip * Math.Max(1, ships.Count);
+        }
+
+        private bool HasUpgradeTreasuryCushion()
+        {
+            return playerCredits >= GetUpgradeTreasuryCushion();
         }
 
         private bool TryStartUpgrade(ShipSnapshot ship, string prefix, UpgradePlan plan)

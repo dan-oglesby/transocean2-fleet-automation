@@ -72,8 +72,8 @@ Upgrade automation is now experimental but active behind the panel's `Auto upgra
 - This low-water-mark rule prevents one ship in a large fleet from consuming all upgrade turns while other enabled ships have fewer upgrades.
 - If the ship is already at a real upgrade dock and an affordable candidate exists, the mod calls the native `ShipFactory.UpgradePlayerShip(...)`.
 - If it needs to travel, the mod chooses a reachable safe upgrade dock with an affordable candidate and tries to carry legal cargo to that exact dock first.
-- If no upgrades are left, the ship is above the fleet upgrade low-water mark, or spendable treasury after reserve is too low, the ship falls through to normal contract automation.
-- Upgrade reserve is currently `max(1,500,000, treasury / 3)`.
+- If no upgrades are left, the ship is above the fleet upgrade low-water mark, the 20,000,000-per-visible-ship fleet cushion has not been reached, or spendable treasury above that cushion is too low, the ship falls through to normal contract automation.
+- Upgrade reserve is currently `20,000,000 * visible ship count`; until treasury is above that reserve, automation only repairs and hauls cargo.
 - Upgrade selection prefers freight-specific revenue upgrades when harbor/export/job data supports them, then fuel consumption, speed, waypoint, repair-duration, tug-fee, and range upgrades.
 
 ## Recent Contract Bug
