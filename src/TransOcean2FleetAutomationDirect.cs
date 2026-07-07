@@ -32,12 +32,13 @@ namespace TransOcean2FleetAutomation.Direct
         private const string CaptainPrefsPrefix = "TO2FA.Captain.";
         private const double ChainOpportunityWeight = 0.35;
         private const float DispatchSettleSeconds = 20f;
+        private const float DispatchSettleMinRealtimeSeconds = 2f;
         private const float PanelMaxWidth = 1180f;
         private const float PanelMaxHeight = 820f;
         private const float ControlHeight = 30f;
         private const float ShipRowHeight = 28f;
-        private const long UpgradeTreasuryCushionPerShip = 20000000L;
-        private const long UpgradeTreasuryFloorTotal = 200000000L;
+        private const long UpgradeTreasuryCushionPerShip = 10000000L;
+        private const long UpgradeTreasuryCapTotal = 50000000L;
         private const float RepairTravelSafetyMarginPercent = 10f;
         private const float AutomationTickBaseRealtimeSeconds = 30f;
         private const float AutomationTickMinRealtimeSeconds = 2f;
@@ -235,11 +236,11 @@ namespace TransOcean2FleetAutomation.Direct
                 GetAutomationTickDelaySeconds(),
                 GetCurrentInGameSpeed()));
             GUILayout.Label(string.Format(
-                "Upgrade cushion: {0:n0} / {1:n0} (higher of {2:n0} per ship or {3:n0} total)",
+                "Upgrade cushion: {0:n0} / {1:n0} (lesser of {2:n0} per ship or {3:n0} total)",
                 playerCredits,
                 GetUpgradeTreasuryCushion(),
                 UpgradeTreasuryCushionPerShip,
-                UpgradeTreasuryFloorTotal));
+                UpgradeTreasuryCapTotal));
 
             GUILayout.BeginHorizontal();
             bool newLiveActions = GUILayout.Toggle(liveActions, "Live actions", GUILayout.Width(150f), GUILayout.Height(ControlHeight));
@@ -1352,7 +1353,7 @@ namespace TransOcean2FleetAutomation.Direct
         private long GetUpgradeTreasuryCushion()
         {
             long perShipReserve = UpgradeTreasuryCushionPerShip * Math.Max(1, ships.Count);
-            return Math.Max(perShipReserve, UpgradeTreasuryFloorTotal);
+            return Math.Min(perShipReserve, UpgradeTreasuryCapTotal);
         }
 
         private bool HasUpgradeTreasuryCushion()
@@ -2466,7 +2467,13 @@ namespace TransOcean2FleetAutomation.Direct
                 return false;
             }
 
-            if (Time.realtimeSinceStartup - lastDispatch <= DispatchSettleSeconds)
+            if (IsShipIdleInHarbor(ship))
+            {
+                lastDispatchRealtimeByShipId.Remove(ship.PlayerShipId);
+                return false;
+            }
+
+            if (Time.realtimeSinceStartup - lastDispatch <= GetDispatchSettleDelaySeconds())
             {
                 return true;
             }
@@ -2482,6 +2489,12 @@ namespace TransOcean2FleetAutomation.Direct
                 lastDispatchRealtimeByShipId[ship.PlayerShipId] = Time.realtimeSinceStartup;
                 ClearIdleTracking(ship);
             }
+        }
+
+        private float GetDispatchSettleDelaySeconds()
+        {
+            float speed = Mathf.Max(1f, GetCurrentInGameSpeed());
+            return Mathf.Clamp(DispatchSettleSeconds / speed, DispatchSettleMinRealtimeSeconds, DispatchSettleSeconds);
         }
 
         private void ClearIdleTracking(ShipSnapshot ship)

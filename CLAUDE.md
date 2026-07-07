@@ -17,7 +17,7 @@ Handoff from the prior Codex session. That session's uncommitted work (game-spee
 1. **Repair threshold slider now spans 1%–99%** (was 50%–100%). Constants `MinSailConditionFloor`/`MinSailConditionCeiling`; `minimumSailCondition` clamp updated in `Awake` and `SetMinimumSailCondition`; slider relabeled "Repair threshold (min condition to sail)".
 2. **`Auto-pilot all + new: ON/OFF` master toggle** replacing the two enable/disable buttons; backed by the persisted `autoPilotAllShips` flag, calls `RefreshFleet(true)` on change, and **auto-enrolls newly-added ships** while on (`AutoEnrollNewShip`).
 3. **Near-opaque panel + click-through blocking** (`GetPanelBackgroundTexture`, `BlockClickThrough`).
-4. **Upgrade cushion is now `max(20M/ship, 200M total)`** (`GetUpgradeTreasuryCushion`, new const `UpgradeTreasuryFloorTotal`).
+4. **Upgrade cushion is now `min(10M/ship, 50M total)`** (`GetUpgradeTreasuryCushion`, const `UpgradeTreasuryCapTotal`).
 5. **Idle-ship repositioning** (`TryRepositionIdleShip` / `FindBestRepositionHarbor` / `TryDeadheadToHarbor`, `Move idle ships to work` toggle + idle-days slider) so contraband-only / dried-up ports stop stranding the fleet.
 6. Documented that native routing is single-destination, so true "cargo on the way" multi-stop is deliberately not implemented (see the contract-pickup note below).
 
@@ -98,7 +98,7 @@ Cargo automation is intended to:
 8. Keep native `IsAI` off, write `DestinationHarbor`, and dispatch with `ShipFactory.SendShipToDestination` when available.
 9. Use the native cast-out event only as a fallback if the direct movement bridge is unavailable.
 
-After any dispatch or service-dock routing, the mod applies a short per-ship settle cooldown before it will issue another action for that ship. This is meant to avoid double-dispatching while the native database is still updating harbor and destination fields.
+After any dispatch or service-dock routing, the mod applies a short per-ship settle cooldown before it will issue another action for that ship. This is meant to avoid double-dispatching while the native database is still updating harbor and destination fields. The cooldown scales down with game speed and clears immediately once the ship is actually idle in a harbor.
 
 If an enabled ship disappears from `GetALLPlayerShips`, the next active fleet refresh logs `enabled ship is missing from the native player ship list`. The July 2026 short run showed `#1976 Skaald` drop out this way after native logs said `GetPlayerIDFromPlayerShip - PlayerShip in playerShips database not found. PlayerShipID: 1976`; an earlier run showed the same signature for `#3201 Lorken`.
 
@@ -112,7 +112,7 @@ Upgrade automation is now experimental but active behind the panel's `Auto upgra
 - If the ship is already at a real upgrade dock and an affordable candidate exists, the mod calls the native `ShipFactory.UpgradePlayerShip(...)`.
 - If it needs to travel, the mod chooses a reachable safe upgrade dock with an affordable candidate and tries to carry legal cargo to that exact dock first.
 - If no upgrades are left, the ship is above the fleet upgrade low-water mark, the fleet cushion has not been reached, or spendable treasury above that cushion is too low, the ship falls through to normal contract automation.
-- Upgrade reserve (`GetUpgradeTreasuryCushion`) is now `max(20,000,000 * visible ship count, 200,000,000)` — that is, **20M per ship for a small company, or a 200M total floor, whichever is higher**. Until treasury is above that reserve, automation only repairs and hauls cargo.
+- Upgrade reserve (`GetUpgradeTreasuryCushion`) is now `min(10,000,000 * visible ship count, 50,000,000)` — that is, **10M per ship for a small company, capped at 50M total**. Until treasury is above that reserve, automation only repairs and hauls cargo.
 - Upgrade selection prefers freight-specific revenue upgrades when harbor/export/job data supports them, then fuel consumption, speed, waypoint, repair-duration, tug-fee, and range upgrades.
 
 ## Recent Contract Bug
