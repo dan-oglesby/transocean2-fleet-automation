@@ -10,6 +10,19 @@ TransOcean 2 Fleet Automation is an experimental live mod for Steam TransOcean 2
 
 The source repo intentionally lives outside Proton Drive.
 
+## Changelog — 2026-07-06 (Claude session)
+
+Handoff from the prior Codex session. That session's uncommitted work (game-speed-scaled automation tick + a sink-risk repair-travel floor) is still in the tree and was left intact. On top of it, this session added, all in `src/TransOcean2FleetAutomationDirect.cs`:
+
+1. **Repair threshold slider now spans 1%–99%** (was 50%–100%). Constants `MinSailConditionFloor`/`MinSailConditionCeiling`; `minimumSailCondition` clamp updated in `Awake` and `SetMinimumSailCondition`; slider relabeled "Repair threshold (min condition to sail)".
+2. **`Auto-pilot all: ON/OFF` master toggle** replacing the two enable/disable buttons; reflects `AreAllVisibleShipsEnabled()` and calls `RefreshFleet(true)` on change.
+3. **Near-opaque panel + click-through blocking** (`GetPanelBackgroundTexture`, `BlockClickThrough`).
+4. **Upgrade cushion is now `max(20M/ship, 200M total)`** (`GetUpgradeTreasuryCushion`, new const `UpgradeTreasuryFloorTotal`).
+5. **Idle-ship repositioning** (`TryRepositionIdleShip` / `FindBestRepositionHarbor` / `TryDeadheadToHarbor`, `Move idle ships to work` toggle + idle-days slider) so contraband-only / dried-up ports stop stranding the fleet.
+6. Documented that native routing is single-destination, so true "cargo on the way" multi-stop is deliberately not implemented (see the contract-pickup note below).
+
+Build verified with `scripts\build-direct.ps1` (csc v3.5, references only `UnityEngine.dll` — keep the code C# 3.5-compatible: no LINQ, no optional/named args, no `var`-only patterns beyond what's already there). Not yet live-tested in-game as of this write-up.
+
 ## Active Loading Path
 
 Use the direct managed patch path, not BepInEx.
@@ -39,11 +52,37 @@ Build only:
 - F10 refreshes the fleet list.
 - `Live actions` defaults on.
 - `Auto repairs` defaults on.
-- `Minimum condition to sail` defaults to 85%.
-- `Repair target condition` defaults to 100%.
+- `Repair threshold (minimum condition to sail)` defaults to 85% and is now adjustable across the full **1%–99%** range.
+- `Repair target condition` defaults to 100% (slider floor follows the repair threshold).
 - `Allow contraband` defaults off.
+- `Move idle ships to work` (idle repositioning) defaults on, with an idle-days slider defaulting to **7 in-game days** (range 1–30).
 
-Ships below the sail threshold are held for maintenance, routed to safe reachable repair docks, or repaired when already in a repair-capable harbor.
+### Panel UI notes (July 2026 update)
+
+- The panel now paints a near-opaque backing texture (`GetPanelBackgroundTexture`, alpha ~0.97) so the game world no longer bleeds through it.
+- `BlockClickThrough(panelRect)` consumes `MouseDown/MouseUp/MouseDrag/ScrollWheel` events that land inside the panel so clicks/scrolls do not fall through to the game view. This only stops IMGUI-level event propagation; it is best-effort against any uGUI/`EventSystem` raycasts the base game runs. If click-through is still observed on some controls, the next step is a full-screen invisible `GUI.Box` behind the panel or a native input-lock hook.
+- The old `Enable all` / `Disable all` buttons are replaced by a single **`Auto-pilot all: ON/OFF`** toggle. Its label reflects `AreAllVisibleShipsEnabled()`, and flipping it calls `SetAllVisibleShips(...)` then `RefreshFleet(true)` so the ship rows immediately reflect the change.
+
+Ships below the sail threshold are held for maintenance, routed to safe reachable repair docks, or repaired when already in a repair-capable harbor. Repair routing derives the native sink-risk threshold by probing `Cargo.ShipFactory.GetShipSinkChance(playerID, condition)` and requires projected arrival condition to be at least 10% above that threshold.
+
+Scheduled automation uses a 30-second real-time base interval divided by `Deck13HH.Timer.CurrentInGameSpeed`, clamped to a 2-second minimum at the fastest speed.
+
+### Idle repositioning (fixes the stalled-fleet / contraband problem)
+
+Previously, an enabled ship with no legal work at its harbor (e.g. a port whose only exports were contraband while `Allow contraband` was off) would log `no matching legal available jobs found` and sit forever. The July 2026 run showed most of the fleet stuck this way. Contraband is still just a filter — `Allow contraband` enables/disables it — but the filter no longer strands ships, because idle ships now move on:
+
+- When an enabled, in-harbor ship finds no legal job plan, the mod starts a per-ship idle timer keyed by `(playerShipId, currentHarbor)` using the in-game clock (`Deck13HH.Timer.CurrentDateTime`). Changing ports resets the timer.
+- Once the ship has been idle at that harbor for at least `idleRepositionDays` (default 7), `TryRepositionIdleShip` picks a destination via `FindBestRepositionHarbor`:
+  - `StaticSQLiteController.GetHarborsFrom(currentHarbor, 0, float.MaxValue, shipClass)` yields class-reachable harbors.
+  - Candidates are sorted by `GetHarborDistance`, then the nearest ones (capped at `IdleRepositionMaxHarborsToProbe = 10`) are probed with `FindBestJobPlanFromHarbor` to confirm they actually have legal work. Arrival condition must keep `GetShipSinkChance` at 0.
+  - The ship deadheads there via `TryDeadheadToHarbor` (native `ShipFactory.SendShipToDestination`) and loads real jobs on arrival at the next tick.
+- The probe count is bounded so one idle ship cannot fan job queries across the whole map. Repositioning is gated behind the `Move idle ships to work` toggle.
+
+### Contract pickup at ports (same-destination and onward work)
+
+Re-evaluation already happens each time a ship is idle in a harbor (scheduled tick, F8, or the per-ship Plan button), so ships take on fresh contracts every time they dock. Same-destination jobs are bundled into one native route (`BuildJobPlanForDestination`), and the one-hop chain bonus steers the chosen first leg toward harbors that have strong follow-on bundles (see "chain scoring" note below).
+
+Note on "cargo that is on the way": the native routing model is **single-destination** — a ship dispatched to harbor B cannot drop cargo at an intermediate harbor A en route. So true multi-stop / short-leg unloading is not implemented; doing it safely would require driving the native waypoint system (upgrade ID 5, `HasWaypointUpgrade`) and per-leg cargo assignment, which risks corrupting native route state. Until that is proven safe, "on the way" is approximated by (a) bundling everything bound for the same destination and (b) chain-scoring toward job-rich onward harbors, then re-planning on arrival.
 
 Repair and upgrade repositioning tries to pay for itself: before sending a ship to the chosen service port, the mod looks for legal same-destination jobs ending at that repair/upgrade harbor. If matching cargo fits, it dispatches with those jobs attached; otherwise it deadheads to the service port.
 
@@ -72,8 +111,8 @@ Upgrade automation is now experimental but active behind the panel's `Auto upgra
 - This low-water-mark rule prevents one ship in a large fleet from consuming all upgrade turns while other enabled ships have fewer upgrades.
 - If the ship is already at a real upgrade dock and an affordable candidate exists, the mod calls the native `ShipFactory.UpgradePlayerShip(...)`.
 - If it needs to travel, the mod chooses a reachable safe upgrade dock with an affordable candidate and tries to carry legal cargo to that exact dock first.
-- If no upgrades are left, the ship is above the fleet upgrade low-water mark, the 20,000,000-per-visible-ship fleet cushion has not been reached, or spendable treasury above that cushion is too low, the ship falls through to normal contract automation.
-- Upgrade reserve is currently `20,000,000 * visible ship count`; until treasury is above that reserve, automation only repairs and hauls cargo.
+- If no upgrades are left, the ship is above the fleet upgrade low-water mark, the fleet cushion has not been reached, or spendable treasury above that cushion is too low, the ship falls through to normal contract automation.
+- Upgrade reserve (`GetUpgradeTreasuryCushion`) is now `max(20,000,000 * visible ship count, 200,000,000)` — that is, **20M per ship for a small company, or a 200M total floor, whichever is higher**. Until treasury is above that reserve, automation only repairs and hauls cargo.
 - Upgrade selection prefers freight-specific revenue upgrades when harbor/export/job data supports them, then fuel consumption, speed, waypoint, repair-duration, tug-fee, and range upgrades.
 
 ## Recent Contract Bug

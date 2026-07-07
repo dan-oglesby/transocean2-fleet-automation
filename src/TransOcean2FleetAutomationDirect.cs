@@ -37,6 +37,16 @@ namespace TransOcean2FleetAutomation.Direct
         private const float ControlHeight = 30f;
         private const float ShipRowHeight = 28f;
         private const long UpgradeTreasuryCushionPerShip = 20000000L;
+        private const long UpgradeTreasuryFloorTotal = 200000000L;
+        private const float RepairTravelSafetyMarginPercent = 10f;
+        private const float AutomationTickBaseRealtimeSeconds = 30f;
+        private const float AutomationTickMinRealtimeSeconds = 2f;
+        private const float MinSailConditionFloor = 1f;
+        private const float MinSailConditionCeiling = 99f;
+        private const float IdleRepositionDefaultDays = 7f;
+        private const float IdleRepositionMinDays = 1f;
+        private const float IdleRepositionMaxDays = 30f;
+        private const int IdleRepositionMaxHarborsToProbe = 10;
 
         private static readonly string[] KnownContrabandFreights = new string[]
         {
@@ -55,6 +65,8 @@ namespace TransOcean2FleetAutomation.Direct
         private readonly Dictionary<int, float> lastDispatchRealtimeByShipId = new Dictionary<int, float>();
         private readonly Dictionary<int, string> lastSeenShipNameById = new Dictionary<int, string>();
         private readonly Dictionary<int, bool> missingShipWarnedByShipId = new Dictionary<int, bool>();
+        private readonly Dictionary<int, DateTime> idleSinceGameDateByShipId = new Dictionary<int, DateTime>();
+        private readonly Dictionary<int, string> idleHarborByShipId = new Dictionary<int, string>();
         private readonly Dictionary<string, bool> contrabandFreightByName = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private readonly List<ShipSnapshot> ships = new List<ShipSnapshot>();
         private readonly List<string> decisionLog = new List<string>();
@@ -74,6 +86,7 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getUpgradeExportFromHarborMethod;
         private MethodInfo getBusinessSharesFromRegionMethod;
         private MethodInfo getHarborDistanceMethod;
+        private MethodInfo getHarborsFromMethod;
         private MethodInfo getRegionOfHarborMethod;
         private MethodInfo getShipClassesMethod;
         private MethodInfo updateJobPlayerShipMethod;
@@ -89,6 +102,7 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getShipSinkChanceMethod;
         private MethodInfo getDaysForRepairMethod;
         private MethodInfo getCurrentDateTimeMethod;
+        private MethodInfo getCurrentInGameSpeedMethod;
         private MethodInfo updatePlayerShipAiStateMethod;
         private MethodInfo sendEventMethod;
         private Type cargoEventType;
@@ -99,12 +113,18 @@ namespace TransOcean2FleetAutomation.Direct
         private bool autoUpgrades = true;
         private bool evaluateEnabledShipsEveryTick = true;
         private bool allowContrabandCargo;
+        private bool autoRepositionIdleShips = true;
         private bool gameSessionActive;
         private float minimumSailCondition = 85f;
         private float repairTargetCondition = 100f;
+        private float idleRepositionDays = IdleRepositionDefaultDays;
+        private Texture2D panelBackgroundTexture;
         private float nextControllerLookup;
         private float nextRefresh;
         private float nextAutomationTick;
+        private float repairSinkDangerCondition;
+        private float repairTravelSafetyFloor = RepairTravelSafetyMarginPercent;
+        private int repairTravelSafetyPlayerId = -1;
         private Vector2 scroll;
         private Vector2 logScroll;
         private int playerId;
@@ -120,10 +140,13 @@ namespace TransOcean2FleetAutomation.Direct
             autoUpgrades = PlayerPrefs.GetInt("TO2FA.AutoUpgrades", 1) == 1;
             evaluateEnabledShipsEveryTick = PlayerPrefs.GetInt("TO2FA.TickEnabled", 1) == 1;
             allowContrabandCargo = PlayerPrefs.GetInt("TO2FA.AllowContrabandCargo", 0) == 1;
+            autoRepositionIdleShips = PlayerPrefs.GetInt("TO2FA.AutoRepositionIdleShips", 1) == 1;
             minimumSailCondition = PlayerPrefs.GetFloat("TO2FA.MinimumSailCondition", 85f);
-            minimumSailCondition = Mathf.Clamp(minimumSailCondition, 50f, 100f);
+            minimumSailCondition = Mathf.Round(Mathf.Clamp(minimumSailCondition, MinSailConditionFloor, MinSailConditionCeiling));
             repairTargetCondition = PlayerPrefs.GetFloat("TO2FA.RepairTargetCondition", 100f);
             repairTargetCondition = Mathf.Clamp(repairTargetCondition, minimumSailCondition, 100f);
+            idleRepositionDays = PlayerPrefs.GetFloat("TO2FA.IdleRepositionDays", IdleRepositionDefaultDays);
+            idleRepositionDays = Mathf.Round(Mathf.Clamp(idleRepositionDays, IdleRepositionMinDays, IdleRepositionMaxDays));
             SeedKnownContrabandFreights();
             AddDecisionLog("Captain UI attached. Live actions are " + (liveActions ? "ON." : "OFF.") + " Cargo policy: " + GetCargoPolicyLabel() + ".");
         }
@@ -162,12 +185,22 @@ namespace TransOcean2FleetAutomation.Direct
                 RefreshFleet(false);
             }
 
-            if (evaluateEnabledShipsEveryTick && Time.realtimeSinceStartup >= nextAutomationTick)
+            if (evaluateEnabledShipsEveryTick)
             {
-                nextAutomationTick = Time.realtimeSinceStartup + 30f;
-                if (IsGameSessionActive() && HasAnyCaptainEnabled())
+                float tickDelay = GetAutomationTickDelaySeconds();
+                float now = Time.realtimeSinceStartup;
+                if (nextAutomationTick <= 0f || nextAutomationTick - now > tickDelay)
                 {
-                    EvaluateEnabledShips("scheduled automation tick");
+                    nextAutomationTick = now + tickDelay;
+                }
+
+                if (now >= nextAutomationTick)
+                {
+                    nextAutomationTick = now + tickDelay;
+                    if (IsGameSessionActive() && HasAnyCaptainEnabled())
+                    {
+                        EvaluateEnabledShips("scheduled automation tick");
+                    }
                 }
             }
         }
@@ -183,15 +216,28 @@ namespace TransOcean2FleetAutomation.Direct
             float height = Mathf.Min(PanelMaxHeight, Mathf.Max(360f, Screen.height - 48f));
             float left = Mathf.Max(8f, (Screen.width - width) * 0.5f);
             float top = Mathf.Max(8f, (Screen.height - height) * 0.5f);
-            GUILayout.BeginArea(new Rect(left, top, width, height), "TO2 Fleet Captain", GUI.skin.window);
+            Rect panelRect = new Rect(left, top, width, height);
+
+            // Paint a near-opaque backing so the game view does not bleed through the panel.
+            GUI.DrawTexture(panelRect, GetPanelBackgroundTexture(), ScaleMode.StretchToFill, false);
+            GUILayout.BeginArea(panelRect, "TO2 Fleet Captain", GUI.skin.window);
 
             GUILayout.Label(statusText);
             GUILayout.Label(string.Format("Player {0} treasury: {1:n0}", playerId, playerCredits));
             GUILayout.Label(string.Format(
-                "Upgrade cushion: {0:n0} / {1:n0} ({2:n0} per visible ship)",
+                "Repair travel floor: {0:0}% arrival condition (sink risk starts near {1:0}%)",
+                repairTravelSafetyFloor,
+                repairSinkDangerCondition));
+            GUILayout.Label(string.Format(
+                "Automation tick: {0:0.#} real seconds at {1:0.#}x game speed",
+                GetAutomationTickDelaySeconds(),
+                GetCurrentInGameSpeed()));
+            GUILayout.Label(string.Format(
+                "Upgrade cushion: {0:n0} / {1:n0} (higher of {2:n0} per ship or {3:n0} total)",
                 playerCredits,
                 GetUpgradeTreasuryCushion(),
-                UpgradeTreasuryCushionPerShip));
+                UpgradeTreasuryCushionPerShip,
+                UpgradeTreasuryFloorTotal));
 
             GUILayout.BeginHorizontal();
             bool newLiveActions = GUILayout.Toggle(liveActions, "Live actions", GUILayout.Width(150f), GUILayout.Height(ControlHeight));
@@ -256,20 +302,23 @@ namespace TransOcean2FleetAutomation.Direct
                 EvaluateEnabledShips("panel button");
             }
 
-            if (GUILayout.Button("Enable all", GUILayout.Width(125f), GUILayout.Height(ControlHeight)))
+            bool allEnabled = AreAllVisibleShipsEnabled();
+            bool newAllEnabled = GUILayout.Toggle(
+                allEnabled,
+                allEnabled ? "Auto-pilot all: ON" : "Auto-pilot all: OFF",
+                GUI.skin.button,
+                GUILayout.Width(190f),
+                GUILayout.Height(ControlHeight));
+            if (newAllEnabled != allEnabled)
             {
-                SetAllVisibleShips(true);
-            }
-
-            if (GUILayout.Button("Disable all", GUILayout.Width(130f), GUILayout.Height(ControlHeight)))
-            {
-                SetAllVisibleShips(false);
+                SetAllVisibleShips(newAllEnabled);
+                RefreshFleet(true);
             }
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label(string.Format("Minimum condition to sail: {0:0}%", minimumSailCondition), GUILayout.Width(265f));
-            float newMinimumSailCondition = GUILayout.HorizontalSlider(minimumSailCondition, 50f, 100f, GUILayout.MinWidth(260f), GUILayout.ExpandWidth(true));
+            GUILayout.Label(string.Format("Repair threshold (min condition to sail): {0:0}%", minimumSailCondition), GUILayout.Width(335f));
+            float newMinimumSailCondition = GUILayout.HorizontalSlider(minimumSailCondition, MinSailConditionFloor, MinSailConditionCeiling, GUILayout.MinWidth(260f), GUILayout.ExpandWidth(true));
             newMinimumSailCondition = Mathf.Round(newMinimumSailCondition);
             if (Mathf.Abs(newMinimumSailCondition - minimumSailCondition) > 0.1f)
             {
@@ -314,6 +363,28 @@ namespace TransOcean2FleetAutomation.Direct
             }
             GUILayout.EndHorizontal();
 
+            GUILayout.BeginHorizontal();
+            bool newAutoReposition = GUILayout.Toggle(autoRepositionIdleShips, "Move idle ships to work", GUILayout.Width(220f), GUILayout.Height(ControlHeight));
+            if (newAutoReposition != autoRepositionIdleShips)
+            {
+                autoRepositionIdleShips = newAutoReposition;
+                PlayerPrefs.SetInt("TO2FA.AutoRepositionIdleShips", autoRepositionIdleShips ? 1 : 0);
+                PlayerPrefs.Save();
+                AddDecisionLog("Idle-ship repositioning " + (autoRepositionIdleShips ? "enabled." : "disabled."));
+            }
+
+            GUILayout.Label(string.Format("Reposition after idle for: {0:0} day(s)", idleRepositionDays), GUILayout.Width(255f));
+            float newIdleDays = GUILayout.HorizontalSlider(idleRepositionDays, IdleRepositionMinDays, IdleRepositionMaxDays, GUILayout.MinWidth(200f), GUILayout.ExpandWidth(true));
+            newIdleDays = Mathf.Round(newIdleDays);
+            if (Mathf.Abs(newIdleDays - idleRepositionDays) > 0.1f)
+            {
+                idleRepositionDays = Mathf.Clamp(newIdleDays, IdleRepositionMinDays, IdleRepositionMaxDays);
+                PlayerPrefs.SetFloat("TO2FA.IdleRepositionDays", idleRepositionDays);
+                PlayerPrefs.Save();
+                AddDecisionLog(string.Format("Idle ships will reposition after {0:0} idle day(s).", idleRepositionDays));
+            }
+            GUILayout.EndHorizontal();
+
             GUILayout.Space(6f);
             GUILayout.BeginHorizontal();
             GUILayout.Label("Auto", GUILayout.Width(70f));
@@ -343,6 +414,41 @@ namespace TransOcean2FleetAutomation.Direct
 
             GUILayout.Label("F8 run enabled ships. F9 hide panel. F10 refresh fleet.");
             GUILayout.EndArea();
+
+            BlockClickThrough(panelRect);
+        }
+
+        private Texture2D GetPanelBackgroundTexture()
+        {
+            if (panelBackgroundTexture == null)
+            {
+                panelBackgroundTexture = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+                panelBackgroundTexture.hideFlags = HideFlags.HideAndDontSave;
+                panelBackgroundTexture.wrapMode = TextureWrapMode.Clamp;
+                panelBackgroundTexture.SetPixel(0, 0, new Color(0.07f, 0.08f, 0.11f, 0.97f));
+                panelBackgroundTexture.Apply();
+            }
+
+            return panelBackgroundTexture;
+        }
+
+        // Consume mouse events that land on the panel so they do not fall through to the game world.
+        private void BlockClickThrough(Rect panelRect)
+        {
+            Event current = Event.current;
+            if (current == null || !panelRect.Contains(current.mousePosition))
+            {
+                return;
+            }
+
+            EventType type = current.type;
+            if (type == EventType.MouseDown
+                || type == EventType.MouseUp
+                || type == EventType.MouseDrag
+                || type == EventType.ScrollWheel)
+            {
+                current.Use();
+            }
         }
 
         private bool ControllersReady
@@ -413,6 +519,7 @@ namespace TransOcean2FleetAutomation.Direct
             getUpgradeExportFromHarborMethod = staticSqLiteType.GetMethod("GetUpgradeExportFromHarbor", new Type[] { typeof(string) });
             getBusinessSharesFromRegionMethod = staticSqLiteType.GetMethod("GetBusinessSharesFromRegion", new Type[] { typeof(int) });
             getHarborDistanceMethod = staticSqLiteType.GetMethod("GetHarborDistance", new Type[] { typeof(string), typeof(string), typeof(int), typeof(bool) });
+            getHarborsFromMethod = staticSqLiteType.GetMethod("GetHarborsFrom", new Type[] { typeof(string), typeof(float), typeof(float), typeof(int) });
             getRegionOfHarborMethod = staticSqLiteType.GetMethod("GetRegionOfHarbor", new Type[] { typeof(string) });
             getShipClassesMethod = staticSqLiteType.GetMethod("GetShipClasses", new Type[] { typeof(int) });
             Type playerShipsType = FindType("DynamicTablePlayerShips");
@@ -435,6 +542,7 @@ namespace TransOcean2FleetAutomation.Direct
             if (timerType != null)
             {
                 getCurrentDateTimeMethod = timerType.GetMethod("get_CurrentDateTime", BindingFlags.Public | BindingFlags.Static);
+                getCurrentInGameSpeedMethod = timerType.GetMethod("get_CurrentInGameSpeed", BindingFlags.Public | BindingFlags.Static);
             }
             cargoEventType = FindType("Deck13HH.EventManagement.CargoEventType");
             Type eventManagerType = FindType("Deck13HH.EventManagement.EventManager");
@@ -468,6 +576,7 @@ namespace TransOcean2FleetAutomation.Direct
                 ships.Clear();
                 playerId = ToInt(getPlayerIdMethod.Invoke(dsqLite, null));
                 playerCredits = ToLong(getPlayerCreditsMethod.Invoke(dsqLite, new object[] { playerId }));
+                RefreshRepairTravelSafetyFloor();
 
                 Dictionary<int, bool> visibleShipIds = new Dictionary<int, bool>();
                 object rawShips = getAllPlayerShipsMethod.Invoke(dsqLite, new object[] { playerId });
@@ -626,23 +735,36 @@ namespace TransOcean2FleetAutomation.Direct
                     skippedNote));
             }
 
-            if (liveActions)
+            if (bestPlan != null)
             {
-                if (bestPlan == null)
-                {
-                    SetNativeAiState(ship, false);
-                    ClearNativeCargoGuard(ship);
-                    AddDecisionLog(prefix + "live dispatch held so native AI cannot choose blocked cargo.");
-                }
-                else
+                ClearIdleTracking(ship);
+                if (liveActions)
                 {
                     DispatchJobPlan(ship, bestPlan, reason);
                 }
+                else
+                {
+                    AddDecisionLog(prefix + "live actions are OFF; recommendation only.");
+                }
+
+                return;
             }
-            else
+
+            if (!liveActions)
             {
                 AddDecisionLog(prefix + "live actions are OFF; recommendation only.");
+                return;
             }
+
+            SetNativeAiState(ship, false);
+            ClearNativeCargoGuard(ship);
+
+            if (autoRepositionIdleShips && TryRepositionIdleShip(ship, prefix))
+            {
+                return;
+            }
+
+            AddDecisionLog(prefix + "live dispatch held so native AI cannot choose blocked cargo.");
         }
 
         private void HandleLowConditionShip(ShipSnapshot ship, string prefix, long reserve)
@@ -844,7 +966,10 @@ namespace TransOcean2FleetAutomation.Direct
             RepairDockCandidate destination = FindBestRepairDock(ship);
             if (destination == null)
             {
-                AddDecisionLog(prefix + "held for maintenance; no safe reachable repair dock found.");
+                AddDecisionLog(prefix + string.Format(
+                    "held for maintenance; no repair dock is reachable with arrival condition at or above {0:0}% (sink risk starts near {1:0}%).",
+                    repairTravelSafetyFloor,
+                    repairSinkDangerCondition));
                 return false;
             }
 
@@ -917,6 +1042,7 @@ namespace TransOcean2FleetAutomation.Direct
 
             bool hasWaypointUpgrade = HasWaypointUpgrade(ship);
             object rawShip = GetLatestRawShip(ship);
+            float safeArrivalFloor = repairTravelSafetyFloor;
             RepairDockCandidate best = null;
             foreach (object harbor in harbors)
             {
@@ -948,6 +1074,11 @@ namespace TransOcean2FleetAutomation.Direct
                 }
 
                 float arrivalCondition = GetRemainingConditionOnArrival(rawShip, ship, city);
+                if (arrivalCondition < safeArrivalFloor)
+                {
+                    continue;
+                }
+
                 int sinkChance = GetShipSinkChance(arrivalCondition);
                 if (sinkChance > 0)
                 {
@@ -964,6 +1095,192 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return best;
+        }
+
+        // Called when a ship is idle in a harbor with no legal work. After the ship has waited past the
+        // configured idle threshold, it deadheads to the nearest class-reachable harbor that does have
+        // legal work, so contraband-only or dried-up ports no longer strand the fleet indefinitely.
+        private bool TryRepositionIdleShip(ShipSnapshot ship, string prefix)
+        {
+            if (!HasKnownCurrentHarbor(ship))
+            {
+                return false;
+            }
+
+            DateTime now = GetCurrentGameDateTime();
+            DateTime idleSince;
+            string idleHarbor;
+            bool tracked = idleSinceGameDateByShipId.TryGetValue(ship.PlayerShipId, out idleSince)
+                && idleHarborByShipId.TryGetValue(ship.PlayerShipId, out idleHarbor)
+                && idleHarbor == ship.CurrentHarbor;
+            if (!tracked)
+            {
+                // First idle tick at this harbor (or the ship moved since we last saw it); start the timer.
+                idleSinceGameDateByShipId[ship.PlayerShipId] = now;
+                idleHarborByShipId[ship.PlayerShipId] = ship.CurrentHarbor;
+                AddDecisionLog(prefix + string.Format(
+                    "no work at {0}; will look for another port if still idle after {1:0} day(s).",
+                    ship.CurrentHarbor,
+                    idleRepositionDays));
+                return false;
+            }
+
+            double idleDays = (now - idleSince).TotalDays;
+            if (idleDays < 0.0)
+            {
+                // Game clock moved backwards (save reload); restart the idle timer.
+                idleSinceGameDateByShipId[ship.PlayerShipId] = now;
+                return false;
+            }
+
+            if (idleDays < idleRepositionDays)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "idle {0:0.#} of {1:0} day(s) at {2}; holding before repositioning.",
+                    idleDays,
+                    idleRepositionDays,
+                    ship.CurrentHarbor));
+                return false;
+            }
+
+            RepairDockCandidate destination = FindBestRepositionHarbor(ship);
+            if (destination == null)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "idle {0:0.#} day(s) at {1} but no reachable harbor with legal work was found; staying put.",
+                    idleDays,
+                    ship.CurrentHarbor));
+                return false;
+            }
+
+            AddDecisionLog(prefix + string.Format(
+                "idle {0:0.#} day(s) at {1}; repositioning to {2} ({3:0} distance units) which has legal work available.",
+                idleDays,
+                ship.CurrentHarbor,
+                destination.Harbor,
+                destination.Distance));
+
+            return TryDeadheadToHarbor(ship, prefix, destination.Harbor, destination.Distance, destination.ArrivalCondition);
+        }
+
+        private RepairDockCandidate FindBestRepositionHarbor(ShipSnapshot ship)
+        {
+            if (getHarborsFromMethod == null || getHarborDistanceMethod == null)
+            {
+                return null;
+            }
+
+            IEnumerable cities;
+            try
+            {
+                cities = getHarborsFromMethod.Invoke(
+                    staticSqLite,
+                    new object[] { ship.CurrentHarbor, 0f, float.MaxValue, ship.Class }) as IEnumerable;
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (cities == null)
+            {
+                return null;
+            }
+
+            bool hasWaypointUpgrade = HasWaypointUpgrade(ship);
+            List<RepairDockCandidate> reachable = new List<RepairDockCandidate>();
+            foreach (object cityObj in cities)
+            {
+                string city = cityObj as string;
+                if (string.IsNullOrEmpty(city) || city == ship.CurrentHarbor)
+                {
+                    continue;
+                }
+
+                float distance;
+                try
+                {
+                    distance = Convert.ToSingle(getHarborDistanceMethod.Invoke(
+                        staticSqLite,
+                        new object[] { ship.CurrentHarbor, city, ship.Class, hasWaypointUpgrade }));
+                }
+                catch
+                {
+                    distance = 0f;
+                }
+
+                if (distance <= 0f)
+                {
+                    continue;
+                }
+
+                RepairDockCandidate candidate = new RepairDockCandidate();
+                candidate.Harbor = city;
+                candidate.Distance = distance;
+                reachable.Add(candidate);
+            }
+
+            if (reachable.Count == 0)
+            {
+                return null;
+            }
+
+            reachable.Sort(delegate(RepairDockCandidate left, RepairDockCandidate right)
+            {
+                return left.Distance.CompareTo(right.Distance);
+            });
+
+            // Probe the nearest harbors first, bounded so one idle ship cannot fan out job queries fleet-wide.
+            object rawShip = GetLatestRawShip(ship);
+            int probed = 0;
+            for (int i = 0; i < reachable.Count && probed < IdleRepositionMaxHarborsToProbe; i++)
+            {
+                RepairDockCandidate candidate = reachable[i];
+                float arrivalCondition = GetRemainingConditionOnArrival(rawShip, ship, candidate.Harbor);
+                if (GetShipSinkChance(arrivalCondition) > 0)
+                {
+                    continue;
+                }
+
+                probed++;
+                JobPlan plan = FindBestJobPlanFromHarbor(ship, candidate.Harbor, false);
+                if (plan != null)
+                {
+                    candidate.ArrivalCondition = arrivalCondition;
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private bool TryDeadheadToHarbor(ShipSnapshot ship, string prefix, string harbor, float distance, float arrivalCondition)
+        {
+            if (sendShipToDestinationMethod == null)
+            {
+                AddDecisionLog(prefix + "cannot reposition; native movement bridge is unavailable.");
+                return false;
+            }
+
+            try
+            {
+                SetNativeAiState(ship, false);
+                ClearNativeCargoGuard(ship);
+                SetNativeDestinationHarbor(ship, harbor);
+                sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, harbor });
+                ship.DestinationHarbor = harbor;
+                MarkShipDispatched(ship);
+                AddDecisionLog(prefix + string.Format(
+                    "repositioning to {0} (arrival condition about {1:0}%); it will load legal work on arrival.",
+                    harbor,
+                    arrivalCondition));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(prefix + "failed to reposition to " + harbor + ": " + UnwrapMessage(ex));
+                return false;
+            }
         }
 
         private bool TryHandleUpgradeNeed(ShipSnapshot ship, string prefix, long reserve)
@@ -1024,7 +1341,8 @@ namespace TransOcean2FleetAutomation.Direct
 
         private long GetUpgradeTreasuryCushion()
         {
-            return UpgradeTreasuryCushionPerShip * Math.Max(1, ships.Count);
+            long perShipReserve = UpgradeTreasuryCushionPerShip * Math.Max(1, ships.Count);
+            return Math.Max(perShipReserve, UpgradeTreasuryFloorTotal);
         }
 
         private bool HasUpgradeTreasuryCushion()
@@ -1289,6 +1607,44 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return condition <= 0f ? 100 : 0;
+        }
+
+        private void RefreshRepairTravelSafetyFloor()
+        {
+            if (playerId <= 0)
+            {
+                return;
+            }
+
+            float detectedDangerCondition = DetectSinkDangerCondition();
+            float detectedSafetyFloor = Mathf.Clamp(detectedDangerCondition + RepairTravelSafetyMarginPercent, 0f, 100f);
+            if (repairTravelSafetyPlayerId == playerId
+                && Math.Abs(detectedDangerCondition - repairSinkDangerCondition) < 0.1f
+                && Math.Abs(detectedSafetyFloor - repairTravelSafetyFloor) < 0.1f)
+            {
+                return;
+            }
+
+            repairTravelSafetyPlayerId = playerId;
+            repairSinkDangerCondition = detectedDangerCondition;
+            repairTravelSafetyFloor = detectedSafetyFloor;
+            AddDecisionLog(string.Format(
+                "Repair travel floor set to {0:0}% arrival condition; native sink risk starts near {1:0}%.",
+                repairTravelSafetyFloor,
+                repairSinkDangerCondition));
+        }
+
+        private float DetectSinkDangerCondition()
+        {
+            for (float condition = 100f; condition >= 0f; condition -= 0.5f)
+            {
+                if (GetShipSinkChance(condition) > 0)
+                {
+                    return condition;
+                }
+            }
+
+            return 0f;
         }
 
         private static long EstimateRepairCost(float startCondition, float targetCondition, long pricePerPercent)
@@ -2114,7 +2470,19 @@ namespace TransOcean2FleetAutomation.Direct
             if (ship != null)
             {
                 lastDispatchRealtimeByShipId[ship.PlayerShipId] = Time.realtimeSinceStartup;
+                ClearIdleTracking(ship);
             }
+        }
+
+        private void ClearIdleTracking(ShipSnapshot ship)
+        {
+            if (ship == null)
+            {
+                return;
+            }
+
+            idleSinceGameDateByShipId.Remove(ship.PlayerShipId);
+            idleHarborByShipId.Remove(ship.PlayerShipId);
         }
 
         private static bool IsNoneOrEmpty(string value)
@@ -2182,6 +2550,32 @@ namespace TransOcean2FleetAutomation.Direct
             return DateTime.Now;
         }
 
+        private float GetCurrentInGameSpeed()
+        {
+            if (getCurrentInGameSpeedMethod != null)
+            {
+                try
+                {
+                    float speed = Convert.ToSingle(getCurrentInGameSpeedMethod.Invoke(null, null));
+                    if (speed > 0f)
+                    {
+                        return speed;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return Mathf.Max(1f, Time.timeScale);
+        }
+
+        private float GetAutomationTickDelaySeconds()
+        {
+            float speed = Mathf.Max(1f, GetCurrentInGameSpeed());
+            return Mathf.Clamp(AutomationTickBaseRealtimeSeconds / speed, AutomationTickMinRealtimeSeconds, AutomationTickBaseRealtimeSeconds);
+        }
+
         private string GetDisplayStatus(ShipSnapshot ship)
         {
             if (IsRepairPending(ship))
@@ -2217,6 +2611,24 @@ namespace TransOcean2FleetAutomation.Direct
             AddDecisionLog((enabled ? "Enabled" : "Disabled") + " TO2 Captain mode for all visible ships.");
         }
 
+        private bool AreAllVisibleShipsEnabled()
+        {
+            if (ships.Count == 0)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < ships.Count; i++)
+            {
+                if (!IsCaptainEnabled(ships[i].PlayerShipId))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private void SyncNativeAiStateForEnabledShips(bool nativeAiEnabled)
         {
             for (int i = 0; i < ships.Count; i++)
@@ -2244,7 +2656,7 @@ namespace TransOcean2FleetAutomation.Direct
 
         private void SetMinimumSailCondition(float value)
         {
-            minimumSailCondition = Mathf.Clamp(value, 50f, 100f);
+            minimumSailCondition = Mathf.Round(Mathf.Clamp(value, MinSailConditionFloor, MinSailConditionCeiling));
             PlayerPrefs.SetFloat("TO2FA.MinimumSailCondition", minimumSailCondition);
             if (repairTargetCondition < minimumSailCondition)
             {
