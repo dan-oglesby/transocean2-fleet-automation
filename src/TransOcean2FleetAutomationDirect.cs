@@ -30,7 +30,12 @@ namespace TransOcean2FleetAutomation.Direct
     {
         private const string LogPrefix = "[TO2FA.Direct]";
         private const string CaptainPrefsPrefix = "TO2FA.Captain.";
-        private const double ChainOpportunityWeight = 0.35;
+        private const int RouteLookaheadDepth = 3;
+        private const int RouteLookaheadBeamWidth = 5;
+        private const int CargoPackingSearchLimit = 14;
+        private const double RouteFutureLegDiscount = 0.6;
+        private const double RouteSameFreightDestinationPenalty = 250000.0;
+        private const double RouteOtherFleetDestinationPenalty = 75000.0;
         private const float DispatchSettleSeconds = 20f;
         private const float DispatchSettleMinRealtimeSeconds = 2f;
         private const float PanelMaxWidth = 1180f;
@@ -2303,40 +2308,49 @@ namespace TransOcean2FleetAutomation.Direct
             return FindBestJobPlanFromHarbor(ship, ship.CurrentHarbor, true);
         }
 
-        private JobPlan FindBestJobPlanFromHarbor(ShipSnapshot ship, string startHarbor, bool includeChainOpportunity)
+        private JobPlan FindBestJobPlanFromHarbor(ShipSnapshot ship, string startHarbor, bool includeRouteLookahead)
         {
-            int contrabandSkipped = 0;
-            int candidateCount = 0;
-            Dictionary<string, List<JobCandidate>> candidatesByDestination = CollectJobCandidatesFromHarbor(ship, startHarbor, out contrabandSkipped, out candidateCount);
-            if (candidatesByDestination == null)
+            Dictionary<string, HarborJobPlanSet> routeCache = includeRouteLookahead
+                ? new Dictionary<string, HarborJobPlanSet>(StringComparer.OrdinalIgnoreCase)
+                : null;
+            HarborJobPlanSet initialPlans = GetRankedJobPlansFromHarbor(ship, startHarbor, routeCache);
+            if (initialPlans == null || initialPlans.Plans.Count == 0)
             {
                 return null;
             }
 
             JobPlan best = null;
-            foreach (KeyValuePair<string, List<JobCandidate>> pair in candidatesByDestination)
+            if (includeRouteLookahead)
             {
-                JobPlan plan = BuildJobPlanForDestination(ship, startHarbor, pair.Key, pair.Value);
-                if (plan == null)
+                HashSet<string> visitedHarbors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrEmpty(startHarbor))
                 {
-                    continue;
+                    visitedHarbors.Add(startHarbor);
                 }
 
-                if (includeChainOpportunity)
+                RoutePlan route = BuildBestRouteFromHarbor(
+                    ship,
+                    startHarbor,
+                    RouteLookaheadDepth,
+                    1.0,
+                    visitedHarbors,
+                    routeCache);
+                if (route != null && route.FirstLeg != null)
                 {
-                    AddChainOpportunity(ship, plan);
+                    best = route.FirstLeg;
+                    ApplyRouteProjection(best, route);
                 }
+            }
 
-                if (best == null || plan.TotalScore > best.TotalScore)
-                {
-                    best = plan;
-                }
+            if (best == null)
+            {
+                best = initialPlans.Plans[0];
             }
 
             if (best != null)
             {
-                best.ContrabandSkipped = contrabandSkipped;
-                best.CandidateCount = candidateCount;
+                best.ContrabandSkipped = initialPlans.ContrabandSkipped;
+                best.CandidateCount = initialPlans.CandidateCount;
             }
 
             return best;
@@ -2366,6 +2380,195 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return plan;
+        }
+
+        private HarborJobPlanSet GetRankedJobPlansFromHarbor(ShipSnapshot ship, string startHarbor, Dictionary<string, HarborJobPlanSet> routeCache)
+        {
+            if (string.IsNullOrEmpty(startHarbor) || startHarbor == "None")
+            {
+                return null;
+            }
+
+            HarborJobPlanSet cached;
+            if (routeCache != null && routeCache.TryGetValue(startHarbor, out cached))
+            {
+                return cached;
+            }
+
+            int contrabandSkipped = 0;
+            int candidateCount = 0;
+            Dictionary<string, List<JobCandidate>> candidatesByDestination = CollectJobCandidatesFromHarbor(ship, startHarbor, out contrabandSkipped, out candidateCount);
+            if (candidatesByDestination == null)
+            {
+                return null;
+            }
+
+            HarborJobPlanSet plans = new HarborJobPlanSet();
+            plans.StartHarbor = startHarbor;
+            plans.ContrabandSkipped = contrabandSkipped;
+            plans.CandidateCount = candidateCount;
+
+            foreach (KeyValuePair<string, List<JobCandidate>> pair in candidatesByDestination)
+            {
+                JobPlan plan = BuildJobPlanForDestination(ship, startHarbor, pair.Key, pair.Value);
+                if (plan != null)
+                {
+                    plans.Plans.Add(plan);
+                }
+            }
+
+            plans.Plans.Sort(delegate(JobPlan left, JobPlan right)
+            {
+                return right.Score.CompareTo(left.Score);
+            });
+
+            if (routeCache != null)
+            {
+                routeCache[startHarbor] = plans;
+            }
+
+            return plans;
+        }
+
+        private RoutePlan BuildBestRouteFromHarbor(
+            ShipSnapshot ship,
+            string startHarbor,
+            int depthRemaining,
+            double scoreMultiplier,
+            HashSet<string> visitedHarbors,
+            Dictionary<string, HarborJobPlanSet> routeCache)
+        {
+            if (depthRemaining <= 0)
+            {
+                return null;
+            }
+
+            HarborJobPlanSet availablePlans = GetRankedJobPlansFromHarbor(ship, startHarbor, routeCache);
+            if (availablePlans == null || availablePlans.Plans.Count == 0)
+            {
+                return null;
+            }
+
+            RoutePlan best = null;
+            int planLimit = Math.Min(RouteLookaheadBeamWidth, availablePlans.Plans.Count);
+            for (int i = 0; i < planLimit; i++)
+            {
+                JobPlan leg = availablePlans.Plans[i];
+                if (leg == null || string.IsNullOrEmpty(leg.End))
+                {
+                    continue;
+                }
+
+                bool revisitsHarbor = visitedHarbors != null && visitedHarbors.Contains(leg.End);
+                if (revisitsHarbor && depthRemaining > 1)
+                {
+                    continue;
+                }
+
+                RoutePlan route = new RoutePlan();
+                double weightedScore = leg.Score * scoreMultiplier;
+                if (Math.Abs(scoreMultiplier - 1.0) < 0.001)
+                {
+                    weightedScore -= GetFleetDestinationCrowdingPenalty(ship, leg.End);
+                }
+
+                route.AddLeg(leg, weightedScore);
+
+                if (depthRemaining > 1 && !revisitsHarbor)
+                {
+                    if (visitedHarbors != null)
+                    {
+                        visitedHarbors.Add(leg.End);
+                    }
+
+                    RoutePlan future = BuildBestRouteFromHarbor(
+                        ship,
+                        leg.End,
+                        depthRemaining - 1,
+                        scoreMultiplier * RouteFutureLegDiscount,
+                        visitedHarbors,
+                        routeCache);
+
+                    if (visitedHarbors != null)
+                    {
+                        visitedHarbors.Remove(leg.End);
+                    }
+
+                    if (future != null)
+                    {
+                        route.Append(future);
+                    }
+                }
+
+                if (best == null
+                    || route.TotalScore > best.TotalScore
+                    || (Math.Abs(route.TotalScore - best.TotalScore) < 0.1 && route.TotalPayment > best.TotalPayment))
+                {
+                    best = route;
+                }
+            }
+
+            return best;
+        }
+
+        private void ApplyRouteProjection(JobPlan firstLeg, RoutePlan route)
+        {
+            if (firstLeg == null || route == null)
+            {
+                return;
+            }
+
+            firstLeg.ChainScore = route.TotalScore - firstLeg.Score;
+            firstLeg.ChainPayment = route.FuturePayment;
+            firstLeg.ChainJobs = route.FutureJobs;
+            firstLeg.ChainEnd = route.GetFutureSummary();
+            firstLeg.ChainDistanceInDays = route.FutureDistanceInDays;
+            firstLeg.RouteLegs = route.Legs.Count;
+        }
+
+        private double GetFleetDestinationCrowdingPenalty(ShipSnapshot ship, string destination)
+        {
+            if (ship == null || string.IsNullOrEmpty(destination))
+            {
+                return 0.0;
+            }
+
+            int sameFreightShips = 0;
+            int otherShips = 0;
+            for (int i = 0; i < ships.Count; i++)
+            {
+                ShipSnapshot fleetShip = ships[i];
+                if (fleetShip == null
+                    || fleetShip.PlayerShipId == ship.PlayerShipId
+                    || !IsCaptainEnabled(fleetShip.PlayerShipId))
+                {
+                    continue;
+                }
+
+                bool isTargetingDestination =
+                    string.Equals(fleetShip.DestinationHarbor, destination, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(fleetShip.CurrentHarbor, destination, StringComparison.OrdinalIgnoreCase);
+                bool isIdleAtDestination =
+                    string.Equals(fleetShip.CurrentHarbor, destination, StringComparison.OrdinalIgnoreCase)
+                    && IsShipIdleInHarbor(fleetShip);
+
+                if (!isTargetingDestination && !isIdleAtDestination)
+                {
+                    continue;
+                }
+
+                if (string.Equals(fleetShip.FreightType, ship.FreightType, StringComparison.OrdinalIgnoreCase))
+                {
+                    sameFreightShips++;
+                }
+                else
+                {
+                    otherShips++;
+                }
+            }
+
+            return (sameFreightShips * RouteSameFreightDestinationPenalty)
+                + (otherShips * RouteOtherFleetDestinationPenalty);
         }
 
         private Dictionary<string, List<JobCandidate>> CollectJobCandidatesFromHarbor(ShipSnapshot ship, string startHarbor, out int contrabandSkipped, out int candidateCount)
@@ -2427,26 +2630,6 @@ namespace TransOcean2FleetAutomation.Direct
             return candidatesByDestination;
         }
 
-        private void AddChainOpportunity(ShipSnapshot ship, JobPlan plan)
-        {
-            if (plan == null || string.IsNullOrEmpty(plan.End) || plan.End == plan.Start)
-            {
-                return;
-            }
-
-            JobPlan followUp = FindBestJobPlanFromHarbor(ship, plan.End, false);
-            if (followUp == null)
-            {
-                return;
-            }
-
-            plan.ChainScore = followUp.Score * ChainOpportunityWeight;
-            plan.ChainPayment = followUp.Payment;
-            plan.ChainJobs = followUp.Jobs.Count;
-            plan.ChainEnd = followUp.End;
-            plan.ChainDistanceInDays = followUp.DistanceInDays;
-        }
-
         private static JobPlan BuildJobPlanForDestination(ShipSnapshot ship, string startHarbor, string destination, List<JobCandidate> candidates)
         {
             if (candidates == null || candidates.Count == 0 || string.IsNullOrEmpty(destination))
@@ -2454,27 +2637,94 @@ namespace TransOcean2FleetAutomation.Direct
                 return null;
             }
 
-            candidates.Sort(delegate(JobCandidate left, JobCandidate right)
+            List<JobCandidate> rankedCandidates = new List<JobCandidate>(candidates);
+            rankedCandidates.Sort(delegate(JobCandidate left, JobCandidate right)
             {
-                return right.Score.CompareTo(left.Score);
+                int priority = GetPackingPriority(ship, right).CompareTo(GetPackingPriority(ship, left));
+                return priority != 0 ? priority : right.Score.CompareTo(left.Score);
             });
 
-            JobPlan plan = new JobPlan();
-            plan.Start = startHarbor;
-            plan.End = destination;
-
-            for (int i = 0; i < candidates.Count; i++)
+            if (rankedCandidates.Count > CargoPackingSearchLimit)
             {
-                JobCandidate candidate = candidates[i];
-                if (!CanAddCandidateToPlan(ship, plan, candidate))
-                {
-                    continue;
-                }
-
-                plan.Add(candidate);
+                rankedCandidates.RemoveRange(CargoPackingSearchLimit, rankedCandidates.Count - CargoPackingSearchLimit);
             }
 
-            return plan.Jobs.Count == 0 ? null : plan;
+            double[] remainingScore = BuildRemainingScore(rankedCandidates);
+            JobPlan current = new JobPlan();
+            current.Start = startHarbor;
+            current.End = destination;
+            JobPlan best = null;
+            SearchPackedJobPlan(ship, rankedCandidates, remainingScore, 0, current, ref best);
+            return best;
+        }
+
+        private static double GetPackingPriority(ShipSnapshot ship, JobCandidate candidate)
+        {
+            if (ship == null || candidate == null)
+            {
+                return 0.0;
+            }
+
+            double capacityShare = 0.0;
+            if (ship.Volume > 0)
+            {
+                capacityShare = Math.Max(capacityShare, (double)candidate.Volume / (double)ship.Volume);
+            }
+
+            if (ship.DeadweightTons > 0)
+            {
+                capacityShare = Math.Max(capacityShare, (double)candidate.Weight / (double)ship.DeadweightTons);
+            }
+
+            return candidate.Score / Math.Max(0.1, capacityShare);
+        }
+
+        private static double[] BuildRemainingScore(List<JobCandidate> candidates)
+        {
+            double[] remainingScore = new double[candidates.Count + 1];
+            for (int i = candidates.Count - 1; i >= 0; i--)
+            {
+                remainingScore[i] = remainingScore[i + 1] + Math.Max(0.0, candidates[i].Score);
+            }
+
+            return remainingScore;
+        }
+
+        private static void SearchPackedJobPlan(
+            ShipSnapshot ship,
+            List<JobCandidate> candidates,
+            double[] remainingScore,
+            int index,
+            JobPlan current,
+            ref JobPlan best)
+        {
+            if (best != null && current.Score + remainingScore[index] <= best.Score + 0.1)
+            {
+                return;
+            }
+
+            if (index >= candidates.Count)
+            {
+                if (current.Jobs.Count > 0
+                    && (best == null
+                        || current.Score > best.Score
+                        || (Math.Abs(current.Score - best.Score) < 0.1 && current.Payment > best.Payment)))
+                {
+                    best = current.Clone();
+                }
+
+                return;
+            }
+
+            JobCandidate candidate = candidates[index];
+            if (CanAddCandidateToPlan(ship, current, candidate))
+            {
+                current.Add(candidate);
+                SearchPackedJobPlan(ship, candidates, remainingScore, index + 1, current, ref best);
+                current.RemoveLast();
+            }
+
+            SearchPackedJobPlan(ship, candidates, remainingScore, index + 1, current, ref best);
         }
 
         private static bool CanAddCandidateToPlan(ShipSnapshot ship, JobPlan plan, JobCandidate candidate)
@@ -3518,6 +3768,121 @@ namespace TransOcean2FleetAutomation.Direct
             public UpgradePlan Plan;
         }
 
+        private sealed class HarborJobPlanSet
+        {
+            public readonly List<JobPlan> Plans = new List<JobPlan>();
+            public string StartHarbor;
+            public int ContrabandSkipped;
+            public int CandidateCount;
+        }
+
+        private sealed class RoutePlan
+        {
+            public readonly List<JobPlan> Legs = new List<JobPlan>();
+            public double TotalScore;
+            public long TotalPayment;
+            public int TotalDistanceInDays;
+            public int TotalJobs;
+
+            public JobPlan FirstLeg
+            {
+                get { return Legs.Count == 0 ? null : Legs[0]; }
+            }
+
+            public long FuturePayment
+            {
+                get
+                {
+                    long payment = 0L;
+                    for (int i = 1; i < Legs.Count; i++)
+                    {
+                        payment += Legs[i].Payment;
+                    }
+
+                    return payment;
+                }
+            }
+
+            public int FutureJobs
+            {
+                get
+                {
+                    int jobs = 0;
+                    for (int i = 1; i < Legs.Count; i++)
+                    {
+                        jobs += Legs[i].Jobs.Count;
+                    }
+
+                    return jobs;
+                }
+            }
+
+            public int FutureDistanceInDays
+            {
+                get
+                {
+                    int days = 0;
+                    for (int i = 1; i < Legs.Count; i++)
+                    {
+                        days += Legs[i].DistanceInDays;
+                    }
+
+                    return days;
+                }
+            }
+
+            public void AddLeg(JobPlan leg, double weightedScore)
+            {
+                if (leg == null)
+                {
+                    return;
+                }
+
+                Legs.Add(leg);
+                TotalScore += weightedScore;
+                TotalPayment += leg.Payment;
+                TotalDistanceInDays += leg.DistanceInDays;
+                TotalJobs += leg.Jobs.Count;
+            }
+
+            public void Append(RoutePlan route)
+            {
+                if (route == null)
+                {
+                    return;
+                }
+
+                for (int i = 0; i < route.Legs.Count; i++)
+                {
+                    Legs.Add(route.Legs[i]);
+                }
+
+                TotalScore += route.TotalScore;
+                TotalPayment += route.TotalPayment;
+                TotalDistanceInDays += route.TotalDistanceInDays;
+                TotalJobs += route.TotalJobs;
+            }
+
+            public string GetFutureSummary()
+            {
+                if (Legs.Count <= 1)
+                {
+                    return string.Empty;
+                }
+
+                List<string> harbors = new List<string>();
+                for (int i = 1; i < Legs.Count; i++)
+                {
+                    if (!string.IsNullOrEmpty(Legs[i].End))
+                    {
+                        harbors.Add(Legs[i].End);
+                    }
+                }
+
+                return harbors.Count == 0 ? string.Empty : string.Join(" -> ", harbors.ToArray());
+            }
+        }
+
         private sealed class JobPlan
         {
             public readonly List<JobCandidate> Jobs = new List<JobCandidate>();
@@ -3533,6 +3898,7 @@ namespace TransOcean2FleetAutomation.Direct
             public int ChainJobs;
             public string ChainEnd;
             public int ChainDistanceInDays;
+            public int RouteLegs;
             public int ContrabandSkipped;
             public int CandidateCount;
             public bool HasContraband;
@@ -3544,15 +3910,17 @@ namespace TransOcean2FleetAutomation.Direct
 
             public string GetChainSummary()
             {
-                if (ChainJobs <= 0 || string.IsNullOrEmpty(ChainEnd))
+                if (Math.Abs(ChainScore) < 0.1 && ChainJobs <= 0)
                 {
                     return string.Empty;
                 }
 
+                string routeSummary = string.IsNullOrEmpty(ChainEnd) ? "no strong follow-on" : ChainEnd;
                 return string.Format(
-                    " Chain opportunity: +{0:0} score toward {1} ({2} follow-on job(s), {3:n0} pay, eta {4}d).",
+                    " Lookahead: {0:+0;-0;0} score via {1} ({2} future leg(s), {3} future job(s), {4:n0} pay, eta +{5}d).",
                     ChainScore,
-                    ChainEnd,
+                    routeSummary,
+                    Math.Max(0, RouteLegs - 1),
                     ChainJobs,
                     ChainPayment,
                     ChainDistanceInDays);
@@ -3577,6 +3945,46 @@ namespace TransOcean2FleetAutomation.Direct
                 DistanceInDays = Math.Max(DistanceInDays, candidate.DistanceInDays);
                 Score += candidate.Score;
                 HasContraband = HasContraband || candidate.IsContraband;
+            }
+
+            public void RemoveLast()
+            {
+                if (Jobs.Count == 0)
+                {
+                    return;
+                }
+
+                JobCandidate candidate = Jobs[Jobs.Count - 1];
+                Jobs.RemoveAt(Jobs.Count - 1);
+                Volume -= candidate.Volume;
+                Weight -= candidate.Weight;
+                Payment -= candidate.Payment;
+                Score -= candidate.Score;
+                RecalculateDerivedState();
+            }
+
+            public JobPlan Clone()
+            {
+                JobPlan clone = new JobPlan();
+                clone.Start = Start;
+                clone.End = End;
+                for (int i = 0; i < Jobs.Count; i++)
+                {
+                    clone.Add(Jobs[i]);
+                }
+
+                return clone;
+            }
+
+            private void RecalculateDerivedState()
+            {
+                DistanceInDays = 0;
+                HasContraband = false;
+                for (int i = 0; i < Jobs.Count; i++)
+                {
+                    DistanceInDays = Math.Max(DistanceInDays, Jobs[i].DistanceInDays);
+                    HasContraband = HasContraband || Jobs[i].IsContraband;
+                }
             }
         }
 

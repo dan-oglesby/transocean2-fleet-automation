@@ -78,9 +78,37 @@ Previously, an enabled ship with no legal work at its harbor (e.g. a port whose 
   - The ship deadheads there via `TryDeadheadToHarbor` (native `ShipFactory.SendShipToDestination`) and loads real jobs on arrival at the next tick.
 - The probe count is bounded so one idle ship cannot fan job queries across the whole map. Repositioning is gated behind the `Move idle ships to work` toggle.
 
+### Smarter routing goal and methodology
+
+The user's strategic goal is to beat hard opponents by doing what native hard AI does not appear to do: keep ships constantly moving on high-value legal routes, chain good follow-on work, avoid dead-end ports, and preserve repair/upgrade safety. Treat route efficiency as the core advantage, not blind spending.
+
+Current methodology:
+
+- Keep native routing single-destination. The mod must not load contracts for multiple destination harbors into one departure until the waypoint/cargo-state model is proven safe.
+- Dispatch only the immediate first leg. Future legs are planning signal only because contracts can disappear by arrival.
+- Prefer net route value over gross payout. Current scoring is still approximate, but it should move toward pay per day after risk, capacity, maintenance, repair/upgrade opportunity, and follow-on work.
+- Keep contraband excluded by default. Smarter routing should never bypass the `Allow contraband` toggle.
+- Keep the search bounded. This runs live in Unity during automation ticks, so use small beam widths, small packing search limits, and per-evaluation caches.
+- Make decisions explainable in logs before making them more aggressive. Good test logs should say why a route won, not only that it won.
+
+Implemented first slice:
+
+- `RoutePlan` now sits above `JobPlan`. `FindBestJobPlanFromHarbor(..., includeRouteLookahead: true)` builds a projected route and returns the first leg for dispatch.
+- Route lookahead is depth 3, beam width 5, with each future leg discounted by `RouteFutureLegDiscount = 0.6`.
+- Future contracts are not accepted early. The first `JobPlan` receives projected `ChainScore`/summary fields so existing dispatch code stays unchanged.
+- Same-destination packing is no longer pure greedy. `BuildJobPlanForDestination` ranks candidate jobs by score per capacity share, searches up to `CargoPackingSearchLimit = 14`, and chooses the best fitting bundle by total adjusted score.
+- First-leg scoring applies a fleet crowding penalty when other enabled ships of the same freight type are already idle at or heading to the candidate destination. This is a light coordination nudge, not a reservation system.
+
+Next useful increments:
+
+- Add fuel/condition-loss/repair-cost estimates into `JobCandidate.Score` or a new net-score method.
+- Add an explicit "dead-end harbor" penalty based on low legal follow-on work rather than relying only on missing future score.
+- Extend service-port routing so repair/upgrade offset cargo uses the same `RoutePlan` explanation, while still requiring the first leg to end at the service harbor.
+- Track planned first destinations separately from native `DestinationHarbor` during the same evaluation cycle if multiple ships are evaluated before native state fully settles.
+
 ### Contract pickup at ports (same-destination and onward work)
 
-Re-evaluation already happens each time a ship is idle in a harbor (scheduled tick, F8, or the per-ship Plan button), so ships take on fresh contracts every time they dock. Same-destination jobs are bundled into one native route (`BuildJobPlanForDestination`), and the one-hop chain bonus steers the chosen first leg toward harbors that have strong follow-on bundles (see "chain scoring" note below).
+Re-evaluation already happens each time a ship is idle in a harbor (scheduled tick, F8, or the per-ship Plan button), so ships take on fresh contracts every time they dock. Same-destination jobs are bundled into one native route (`BuildJobPlanForDestination`), and the route lookahead steers the chosen first leg toward harbors that have strong follow-on bundles.
 
 Note on "cargo that is on the way": the native routing model is **single-destination** — a ship dispatched to harbor B cannot drop cargo at an intermediate harbor A en route. So true multi-stop / short-leg unloading is not implemented; doing it safely would require driving the native waypoint system (upgrade ID 5, `HasWaypointUpgrade`) and per-leg cargo assignment, which risks corrupting native route state. Until that is proven safe, "on the way" is approximated by (a) bundling everything bound for the same destination and (b) chain-scoring toward job-rich onward harbors, then re-planning on arrival.
 
@@ -91,8 +119,8 @@ Cargo automation is intended to:
 1. Find available jobs from the current harbor.
 2. Exclude contraband freight by default using the game's `StaticTableFreightAttributes.Smugglersware`.
 3. Rank jobs by pay per day, relationship points, and penalty risk.
-4. Bundle same-destination jobs that fit.
-5. Add a discounted one-hop chain opportunity bonus for destinations whose arrival harbor has another strong legal bundle available.
+4. Bundle same-destination jobs that fit, using a bounded search rather than simple greedy packing.
+5. Run a bounded route lookahead over likely follow-on harbors and discount future legs.
 6. Attach immediate-destination jobs directly via `DynamicSQLiteController.UpdatePlayerShipIDFromJob`.
 7. Set `DontLoadJobs` so native AI does not add blocked cargo.
 8. Keep native `IsAI` off, write `DestinationHarbor`, and dispatch with `ShipFactory.SendShipToDestination` when available.
@@ -102,7 +130,7 @@ After any dispatch or service-dock routing, the mod applies a short per-ship set
 
 If an enabled ship disappears from `GetALLPlayerShips`, the next active fleet refresh logs `enabled ship is missing from the native player ship list`. The July 2026 short run showed `#1976 Skaald` drop out this way after native logs said `GetPlayerIDFromPlayerShip - PlayerShip in playerShips database not found. PlayerShipID: 1976`; an earlier run showed the same signature for `#3201 Lorken`.
 
-The chain scoring is intentionally advisory. It does not accept future-harbor jobs early and it does not mix cargo for multiple destinations into one native route. It only nudges the first destination toward harbors with better follow-on work, then lets the next automation tick re-evaluate after arrival.
+The route lookahead is intentionally advisory. It does not accept future-harbor jobs early and it does not mix cargo for multiple destinations into one native route. It only nudges the first destination toward harbors with better follow-on work, then lets the next automation tick re-evaluate after arrival.
 
 Upgrade automation is now experimental but active behind the panel's `Auto upgrades` toggle.
 

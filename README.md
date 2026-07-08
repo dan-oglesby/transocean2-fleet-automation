@@ -25,8 +25,8 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Cargo automation defaults to legal cargo only. Freights marked `Smugglersware` by the game's freight attributes are excluded unless `Allow contraband` is enabled in the panel.
 - Direct dispatch attaches the selected jobs itself, blocks the native AI loader from adding extra cargo, sets the destination explicitly, and then uses the built-in movement path.
 - When multiple legal jobs fit for the same destination, the planner can load them together as same-port easy wins.
-- Route scoring also looks one harbor ahead: destinations get a discounted follow-on opportunity bonus when the arrival harbor has another strong legal job bundle available for the same ship type.
-- The chain bonus affects which first-leg route is chosen; the mod still only accepts and loads the immediate destination's jobs, then re-evaluates after arrival.
+- Route scoring uses a bounded lookahead planner: it simulates up to three legal same-destination cargo legs, keeps only the strongest few branches, discounts future legs, and uses that projected route value to choose the first dispatch.
+- The route projection affects which first-leg route is chosen; the mod still only accepts and loads the immediate destination's jobs, then re-evaluates after arrival.
 - Holds enabled ships below the configured repair threshold (minimum condition to sail) instead of sending them back out for normal jobs. That threshold is adjustable across the full 1%–99% range.
 - A single `Auto-pilot all + new` toggle enables/disables TO2 Captain mode for every visible ship at once and shows its current on/off state; toggling it refreshes the ship list immediately. While it is on, ships added to the fleet later are automatically enrolled too (unless you had explicitly turned a specific ship off).
 - The panel paints a near-opaque background and swallows mouse clicks/scrolls that land on it so they do not fall through to the game world.
