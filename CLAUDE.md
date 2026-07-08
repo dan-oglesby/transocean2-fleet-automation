@@ -114,6 +114,7 @@ Upgrade automation is now experimental but active behind the panel's `Auto upgra
 - If no upgrades are left, the ship is more than one upgrade ahead of the fleet upgrade low-water mark, the fleet cushion has not been reached, or spendable treasury above that cushion is too low, the ship falls through to normal contract automation.
 - Upgrade reserve (`GetUpgradeTreasuryCushion`) is now `min(10,000,000 * visible ship count, 50,000,000)` — that is, **10M per ship for a small company, capped at 50M total**. Until treasury is above that reserve, automation only repairs and hauls cargo.
 - Upgrade selection prefers freight-specific revenue upgrades when harbor/export/job data supports them, then fuel consumption, speed, waypoint, repair-duration, tug-fee, and range upgrades.
+- Freight-upgrade scoring includes a same-type fleet diversity adjustment. It counts both installed freight upgrades and planned upgrade-dock routing (`plannedFreightUpgradeByShipId`) so same-type ships spread across available cargo niches instead of all selecting the same upgrade ID.
 
 ## Recent Contract Bug
 

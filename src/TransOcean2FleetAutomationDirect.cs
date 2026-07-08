@@ -69,6 +69,7 @@ namespace TransOcean2FleetAutomation.Direct
         private readonly Dictionary<int, bool> missingShipWarnedByShipId = new Dictionary<int, bool>();
         private readonly Dictionary<int, DateTime> idleSinceGameDateByShipId = new Dictionary<int, DateTime>();
         private readonly Dictionary<int, string> idleHarborByShipId = new Dictionary<int, string>();
+        private readonly Dictionary<int, int> plannedFreightUpgradeByShipId = new Dictionary<int, int>();
         private readonly Dictionary<string, bool> contrabandFreightByName = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private readonly List<ShipSnapshot> ships = new List<ShipSnapshot>();
         private readonly List<string> decisionLog = new List<string>();
@@ -1014,6 +1015,11 @@ namespace TransOcean2FleetAutomation.Direct
                 SetNativeDestinationHarbor(ship, harbor);
                 sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, harbor });
                 ship.DestinationHarbor = harbor;
+                if (!string.Equals(serviceName, "upgrade", StringComparison.OrdinalIgnoreCase))
+                {
+                    ClearPlannedFreightUpgrade(ship);
+                }
+
                 MarkShipDispatched(ship);
                 AddDecisionLog(prefix + string.Format(
                     "routing to {0} dock at {1} ({2:0} distance units, arrival condition about {3:0}%) before taking more work.",
@@ -1281,6 +1287,7 @@ namespace TransOcean2FleetAutomation.Direct
                 SetNativeDestinationHarbor(ship, harbor);
                 sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, harbor });
                 ship.DestinationHarbor = harbor;
+                ClearPlannedFreightUpgrade(ship);
                 MarkShipDispatched(ship);
                 AddDecisionLog(prefix + string.Format(
                     "repositioning to {0} (arrival condition about {1:0}%); it will load legal work on arrival.",
@@ -1330,7 +1337,14 @@ namespace TransOcean2FleetAutomation.Direct
 
             SetNativeAiState(ship, false);
             ClearNativeCargoGuard(ship);
-            return TrySendToServiceDock(ship, prefix, "upgrade", destination.Harbor, destination.Distance, destination.ArrivalCondition);
+            SetPlannedFreightUpgrade(ship, destination.Plan.UpgradeId);
+            bool routed = TrySendToServiceDock(ship, prefix, "upgrade", destination.Harbor, destination.Distance, destination.ArrivalCondition);
+            if (!routed)
+            {
+                ClearPlannedFreightUpgrade(ship);
+            }
+
+            return routed;
         }
 
         private bool HasFleetUpgradeTurn(ShipSnapshot ship)
@@ -1392,6 +1406,7 @@ namespace TransOcean2FleetAutomation.Direct
                 ship.Upgraded = false;
                 WriteField(rawShip, "Upgraded", false);
                 WriteField(rawShip, "Upgrade" + plan.Slot, plan.UpgradeId);
+                ClearPlannedFreightUpgrade(ship);
 
                 AddDecisionLog(prefix + string.Format(
                     "upgrade started at {0}: {1} (ID {2}, slot {3}) for about {4:n0} credits.",
@@ -1404,6 +1419,7 @@ namespace TransOcean2FleetAutomation.Direct
             }
             catch (Exception ex)
             {
+                ClearPlannedFreightUpgrade(ship);
                 AddDecisionLog(prefix + "upgrade start failed: " + UnwrapMessage(ex));
                 return false;
             }
@@ -2045,9 +2061,134 @@ namespace TransOcean2FleetAutomation.Direct
             if (IsFreightUpgrade(upgradeId))
             {
                 score += EstimateFreightUpgradeOpportunity(ship, harborName, upgradeId);
+                score += GetFreightUpgradeDiversityScore(ship, upgradeId);
             }
 
             return score;
+        }
+
+        private double GetFreightUpgradeDiversityScore(ShipSnapshot ship, int upgradeId)
+        {
+            if (ship == null || !IsFreightUpgrade(upgradeId))
+            {
+                return 0.0;
+            }
+
+            int[] group = GetFreightUpgradeIdsForType(ship.FreightType);
+            if (group.Length == 0)
+            {
+                return 0.0;
+            }
+
+            int candidateCount = CountSameTypeFreightUpgradeUse(ship, upgradeId);
+            int minimumCount = int.MaxValue;
+            for (int i = 0; i < group.Length; i++)
+            {
+                int id = group[i];
+                if (!IsUpgradeCompatibleWithShip(ship, id))
+                {
+                    continue;
+                }
+
+                minimumCount = Math.Min(minimumCount, CountSameTypeFreightUpgradeUse(ship, id));
+            }
+
+            if (minimumCount == int.MaxValue)
+            {
+                return 0.0;
+            }
+
+            double score = (minimumCount - candidateCount) * 6000000.0;
+            int preferredId = GetPreferredFreightUpgradeId(ship, group);
+            if (upgradeId == preferredId)
+            {
+                score += 2000000.0;
+            }
+
+            return score;
+        }
+
+        private int CountSameTypeFreightUpgradeUse(ShipSnapshot focusShip, int upgradeId)
+        {
+            int count = 0;
+            for (int i = 0; i < ships.Count; i++)
+            {
+                ShipSnapshot fleetShip = ships[i];
+                if (fleetShip == null
+                    || fleetShip.PlayerShipId == focusShip.PlayerShipId
+                    || !IsCaptainEnabled(fleetShip.PlayerShipId)
+                    || !string.Equals(fleetShip.FreightType, focusShip.FreightType, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                bool counted = fleetShip.Upgrade4 == upgradeId || fleetShip.Upgrade5 == upgradeId;
+                if (counted)
+                {
+                    count++;
+                }
+
+                int plannedUpgradeId;
+                if (!counted
+                    && plannedFreightUpgradeByShipId.TryGetValue(fleetShip.PlayerShipId, out plannedUpgradeId)
+                    && plannedUpgradeId == upgradeId)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private int GetPreferredFreightUpgradeId(ShipSnapshot ship, int[] group)
+        {
+            if (ship == null || group == null || group.Length == 0)
+            {
+                return 0;
+            }
+
+            int start = PositiveModulo(ship.PlayerShipId, group.Length);
+            for (int i = 0; i < group.Length; i++)
+            {
+                int id = group[(start + i) % group.Length];
+                if (IsUpgradeCompatibleWithShip(ship, id))
+                {
+                    return id;
+                }
+            }
+
+            return 0;
+        }
+
+        private static int PositiveModulo(int value, int divisor)
+        {
+            if (divisor <= 0)
+            {
+                return 0;
+            }
+
+            int result = value % divisor;
+            return result < 0 ? result + divisor : result;
+        }
+
+        private static int[] GetFreightUpgradeIdsForType(string freightType)
+        {
+            if (string.Equals(freightType, "Container", StringComparison.OrdinalIgnoreCase))
+            {
+                return new int[] { 7, 8, 9 };
+            }
+
+            if (string.Equals(freightType, "Bulk", StringComparison.OrdinalIgnoreCase))
+            {
+                return new int[] { 10, 11, 12 };
+            }
+
+            if (string.Equals(freightType, "Tank", StringComparison.OrdinalIgnoreCase))
+            {
+                return new int[] { 13, 14, 15 };
+            }
+
+            return new int[0];
         }
 
         private static double GetBaseUpgradeUtility(int upgradeId)
@@ -2406,6 +2547,11 @@ namespace TransOcean2FleetAutomation.Direct
                 if (sent)
                 {
                     ship.DestinationHarbor = plan.End;
+                    if (!IsUpgradeDockRoutingReason(reason))
+                    {
+                        ClearPlannedFreightUpgrade(ship);
+                    }
+
                     MarkShipDispatched(ship);
                     AddDecisionLog(string.Format(
                         "#{0} {1}: loaded {2} {3}job(s) for {4} and dispatched from {5}.",
@@ -2505,6 +2651,37 @@ namespace TransOcean2FleetAutomation.Direct
         {
             float speed = Mathf.Max(1f, GetCurrentInGameSpeed());
             return Mathf.Clamp(DispatchSettleSeconds / speed, DispatchSettleMinRealtimeSeconds, DispatchSettleSeconds);
+        }
+
+        private void SetPlannedFreightUpgrade(ShipSnapshot ship, int upgradeId)
+        {
+            if (ship == null)
+            {
+                return;
+            }
+
+            if (IsFreightUpgrade(upgradeId))
+            {
+                plannedFreightUpgradeByShipId[ship.PlayerShipId] = upgradeId;
+            }
+            else
+            {
+                plannedFreightUpgradeByShipId.Remove(ship.PlayerShipId);
+            }
+        }
+
+        private void ClearPlannedFreightUpgrade(ShipSnapshot ship)
+        {
+            if (ship != null)
+            {
+                plannedFreightUpgradeByShipId.Remove(ship.PlayerShipId);
+            }
+        }
+
+        private static bool IsUpgradeDockRoutingReason(string reason)
+        {
+            return !string.IsNullOrEmpty(reason)
+                && reason.IndexOf("upgrade dock routing", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void ClearIdleTracking(ShipSnapshot ship)
@@ -2898,6 +3075,7 @@ namespace TransOcean2FleetAutomation.Direct
                 {
                     SetNativeAiState(ship, false);
                     ClearNativeCargoGuard(ship);
+                    ClearPlannedFreightUpgrade(ship);
                     AddDecisionLog(string.Format("#{0} {1}: TO2 Captain disabled; native AI state restored to manual.", ship.PlayerShipId, ship.Name));
                 }
             }

@@ -36,6 +36,7 @@ Keep `doorstop_config.ini` set to `enabled = false` for normal play until the lo
 - Maintenance routing runs before the normal idle-in-harbor check, so just-arrived ships with transitional statuses still get an active repair decision when they have a real current harbor.
 - Auto upgrades can route idle ships to real upgrade docks and start the game's native upgrade flow only after treasury is above the fleet cushion, which is the lesser of 10,000,000 per visible ship or a 50,000,000 total cap.
 - Upgrade turns are balanced across enabled ships by installed-upgrade count; ships can keep upgrading while they are no more than one upgrade ahead of the fleet low-water mark.
+- Freight-specific cargo upgrades are diversified across enabled ships of the same freight type, counting both installed and planned upgrades so identical ships do not all chase the same cargo niche.
 - Scores available jobs from each idle ship's current harbor using payment per travel day, relationship points, and penalty risk.
 - Uses a simple treasury reserve check before starting automated repairs.
 - Press `F8` in-game to run enabled ships.
