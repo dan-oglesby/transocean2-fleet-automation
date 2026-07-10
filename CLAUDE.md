@@ -57,6 +57,21 @@ Build only:
 - `Allow contraband` defaults off.
 - `Move idle ships to work` (idle repositioning) defaults on, with an idle-days slider defaulting to **7 in-game days** (range 1–30).
 
+### Runtime popup and newsticker hygiene (July 2026 update)
+
+The mod now includes a session-gated UI watchdog in `HandleRuntimeUiWatchdogs`.
+
+- It only runs when `IsGameSessionActive()` is true, so it should not affect the main menu or loading screens.
+- Tugboat strike popups are detected via `Cargo.StrikePopup` and dismissed after **25 real seconds** by invoking the native `ButtonWait()` method. This chooses the base-game "wait" outcome rather than launching the tugboat minigame.
+- Customs/contraband search popups are detected via `Cargo.MenuRandomEventsCustomsControl` and closed after **25 real seconds** through `Deck13HH.UI.WindowManager.CloseWindow("MenuRandomEventsCustomsControl")`. Native `OnWindowClose` resumes the HUD if RTS mode is active.
+- Newsticker consolidation scans every 4 real seconds. For noisy fleet notice types, it keeps the newest **3** visible/clickable entries per type and removes older entries only after a **90-second** grace period.
+- Consolidated native `NewsType` values are:
+  - `0` commission delivery / ship arrival job feedback (`ShipCastIn` / `MenuJobfeedback`)
+  - `2` scanner found contraband
+  - `3` ship repair complete
+  - `4` ship upgrade complete
+- The native method is `Cargo.NewstickerItem.MoveToArchive()`, which actually destroys the item GameObject. There is no true native expandable archive exposed by that method. Treat this as a gentle anti-pileup pass, not a full grouped-notification UI yet.
+
 ### Panel UI notes (July 2026 update)
 
 - The panel now paints a near-opaque backing texture (`GetPanelBackgroundTexture`, alpha ~0.97) so the game world no longer bleeds through it.

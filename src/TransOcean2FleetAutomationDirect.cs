@@ -48,6 +48,10 @@ namespace TransOcean2FleetAutomation.Direct
         private const float RepairTravelSafetyMarginPercent = 10f;
         private const float AutomationTickBaseRealtimeSeconds = 30f;
         private const float AutomationTickMinRealtimeSeconds = 2f;
+        private const float BlockingPopupTimeoutRealtimeSeconds = 25f;
+        private const float FleetNotificationScanRealtimeSeconds = 4f;
+        private const float FleetNotificationGraceRealtimeSeconds = 90f;
+        private const int FleetNotificationMaxVisiblePerType = 3;
         private const float MinSailConditionFloor = 1f;
         private const float MinSailConditionCeiling = 99f;
         private const float IdleRepositionDefaultDays = 7f;
@@ -76,6 +80,9 @@ namespace TransOcean2FleetAutomation.Direct
         private readonly Dictionary<int, string> idleHarborByShipId = new Dictionary<int, string>();
         private readonly Dictionary<int, int> plannedFreightUpgradeByShipId = new Dictionary<int, int>();
         private readonly Dictionary<string, bool> contrabandFreightByName = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, float> blockingPopupFirstSeenRealtimeByName = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<int, float> newstickerFirstSeenRealtimeById = new Dictionary<int, float>();
+        private readonly HashSet<int> newstickerArchivedIds = new HashSet<int>();
         private readonly List<ShipSnapshot> ships = new List<ShipSnapshot>();
         private readonly List<string> decisionLog = new List<string>();
 
@@ -113,7 +120,15 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getCurrentInGameSpeedMethod;
         private MethodInfo updatePlayerShipAiStateMethod;
         private MethodInfo sendEventMethod;
+        private MethodInfo strikePopupButtonWaitMethod;
+        private MethodInfo closeWindowMethod;
+        private MethodInfo getWindowByIdentifierMethod;
+        private MethodInfo newstickerMoveToArchiveMethod;
         private Type cargoEventType;
+        private Type strikePopupType;
+        private Type customsPopupType;
+        private Type newstickerItemType;
+        private bool runtimeUiHooksResolved;
 
         private bool showPanel;
         private bool liveActions = true;
@@ -134,6 +149,7 @@ namespace TransOcean2FleetAutomation.Direct
         private float repairSinkDangerCondition;
         private float repairTravelSafetyFloor = RepairTravelSafetyMarginPercent;
         private int repairTravelSafetyPlayerId = -1;
+        private float nextFleetNotificationScan;
         private Vector2 scroll;
         private Vector2 logScroll;
         private int playerId;
@@ -212,6 +228,15 @@ namespace TransOcean2FleetAutomation.Direct
                         EvaluateEnabledShips("scheduled automation tick");
                     }
                 }
+            }
+
+            if (IsGameSessionActive())
+            {
+                HandleRuntimeUiWatchdogs();
+            }
+            else
+            {
+                ResetRuntimeUiWatchdogs();
             }
         }
 
@@ -474,6 +499,484 @@ namespace TransOcean2FleetAutomation.Direct
             return gameSessionActive && playerId > 0 && ships.Count > 0;
         }
 
+        private void ResolveRuntimeUiHooks()
+        {
+            if (runtimeUiHooksResolved)
+            {
+                return;
+            }
+
+            runtimeUiHooksResolved = true;
+            strikePopupType = FindType("Cargo.StrikePopup");
+            if (strikePopupType != null)
+            {
+                strikePopupButtonWaitMethod = strikePopupType.GetMethod(
+                    "ButtonWait",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+
+            customsPopupType = FindType("Cargo.MenuRandomEventsCustomsControl");
+
+            Type windowManagerType = FindType("Deck13HH.UI.WindowManager");
+            if (windowManagerType != null)
+            {
+                closeWindowMethod = windowManagerType.GetMethod(
+                    "CloseWindow",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new Type[] { typeof(string) },
+                    null);
+                getWindowByIdentifierMethod = windowManagerType.GetMethod(
+                    "GetWindowByIdentifier",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new Type[] { typeof(string) },
+                    null);
+            }
+
+            newstickerItemType = FindType("Cargo.NewstickerItem");
+            if (newstickerItemType != null)
+            {
+                newstickerMoveToArchiveMethod = newstickerItemType.GetMethod(
+                    "MoveToArchive",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+
+            if (strikePopupButtonWaitMethod == null || closeWindowMethod == null || getWindowByIdentifierMethod == null || newstickerMoveToArchiveMethod == null)
+            {
+                Debug.Log(LogPrefix + " Runtime UI hooks partially available: StrikePopup="
+                    + (strikePopupButtonWaitMethod != null)
+                    + ", CloseWindow="
+                    + (closeWindowMethod != null)
+                    + ", GetWindow="
+                    + (getWindowByIdentifierMethod != null)
+                    + ", NewstickerArchive="
+                    + (newstickerMoveToArchiveMethod != null));
+            }
+        }
+
+        private void HandleRuntimeUiWatchdogs()
+        {
+            ResolveRuntimeUiHooks();
+            HandleBlockingPopupTimeouts();
+            HandleFleetNotificationConsolidation();
+        }
+
+        private void ResetRuntimeUiWatchdogs()
+        {
+            blockingPopupFirstSeenRealtimeByName.Clear();
+            newstickerFirstSeenRealtimeById.Clear();
+            newstickerArchivedIds.Clear();
+            nextFleetNotificationScan = 0f;
+        }
+
+        private void HandleBlockingPopupTimeouts()
+        {
+            bool strikePopupOpen = IsNativeWindowOpen("StrikePopup");
+            object strikePopup = strikePopupOpen ? GetNativeWindowComponent("StrikePopup", strikePopupType) : null;
+            if (TrackPopupAndCheckTimeout("StrikePopup", strikePopupOpen && strikePopup != null, BlockingPopupTimeoutRealtimeSeconds))
+            {
+                DismissTugboatStrikePopup(strikePopup);
+            }
+
+            bool customsPopupOpen = IsNativeWindowOpen("MenuRandomEventsCustomsControl");
+            if (TrackPopupAndCheckTimeout("MenuRandomEventsCustomsControl", customsPopupOpen, BlockingPopupTimeoutRealtimeSeconds))
+            {
+                DismissCustomsControlPopup();
+            }
+        }
+
+        private bool TrackPopupAndCheckTimeout(string popupName, bool popupOpen, float timeoutSeconds)
+        {
+            if (!popupOpen)
+            {
+                blockingPopupFirstSeenRealtimeByName.Remove(popupName);
+                return false;
+            }
+
+            float now = Time.realtimeSinceStartup;
+            float firstSeen;
+            if (!blockingPopupFirstSeenRealtimeByName.TryGetValue(popupName, out firstSeen) || firstSeen > now)
+            {
+                blockingPopupFirstSeenRealtimeByName[popupName] = now;
+                return false;
+            }
+
+            return now - firstSeen >= timeoutSeconds;
+        }
+
+        private void DismissTugboatStrikePopup(object strikePopup)
+        {
+            if (strikePopupButtonWaitMethod == null)
+            {
+                blockingPopupFirstSeenRealtimeByName["StrikePopup"] = Time.realtimeSinceStartup;
+                AddDecisionLog("Tugboat strike popup reached its timeout, but the native wait button hook is unavailable.");
+                return;
+            }
+
+            try
+            {
+                strikePopupButtonWaitMethod.Invoke(strikePopup, null);
+                blockingPopupFirstSeenRealtimeByName.Remove("StrikePopup");
+                AddDecisionLog(string.Format(
+                    "Tugboat strike popup timed out after {0:0} seconds; chose Wait so the game can continue.",
+                    BlockingPopupTimeoutRealtimeSeconds));
+            }
+            catch (Exception ex)
+            {
+                blockingPopupFirstSeenRealtimeByName["StrikePopup"] = Time.realtimeSinceStartup;
+                AddDecisionLog("Tugboat strike timeout failed: " + UnwrapMessage(ex));
+            }
+        }
+
+        private void DismissCustomsControlPopup()
+        {
+            if (closeWindowMethod == null)
+            {
+                blockingPopupFirstSeenRealtimeByName["MenuRandomEventsCustomsControl"] = Time.realtimeSinceStartup;
+                AddDecisionLog("Customs search popup reached its timeout, but the native close hook is unavailable.");
+                return;
+            }
+
+            try
+            {
+                closeWindowMethod.Invoke(null, new object[] { "MenuRandomEventsCustomsControl" });
+                blockingPopupFirstSeenRealtimeByName.Remove("MenuRandomEventsCustomsControl");
+                AddDecisionLog(string.Format(
+                    "Customs search popup timed out after {0:0} seconds; closed notification so the game can continue.",
+                    BlockingPopupTimeoutRealtimeSeconds));
+            }
+            catch (Exception ex)
+            {
+                blockingPopupFirstSeenRealtimeByName["MenuRandomEventsCustomsControl"] = Time.realtimeSinceStartup;
+                AddDecisionLog("Customs search timeout failed: " + UnwrapMessage(ex));
+            }
+        }
+
+        private void HandleFleetNotificationConsolidation()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < nextFleetNotificationScan)
+            {
+                return;
+            }
+
+            nextFleetNotificationScan = now + FleetNotificationScanRealtimeSeconds;
+            if (newstickerItemType == null || newstickerMoveToArchiveMethod == null)
+            {
+                return;
+            }
+
+            UnityEngine.Object[] items = FindRuntimeObjectsOfType(newstickerItemType);
+            Dictionary<int, bool> visibleIds = new Dictionary<int, bool>();
+            Dictionary<int, List<FleetNoticeSnapshot>> noticesByType = new Dictionary<int, List<FleetNoticeSnapshot>>();
+
+            for (int i = 0; i < items.Length; i++)
+            {
+                FleetNoticeSnapshot notice = ReadFleetNoticeSnapshot(items[i], now);
+                if (notice == null)
+                {
+                    continue;
+                }
+
+                visibleIds[notice.Id] = true;
+                if (!IsConsolidatableFleetNewsType(notice.NewsType) || newstickerArchivedIds.Contains(notice.Id))
+                {
+                    continue;
+                }
+
+                List<FleetNoticeSnapshot> list;
+                if (!noticesByType.TryGetValue(notice.NewsType, out list))
+                {
+                    list = new List<FleetNoticeSnapshot>();
+                    noticesByType[notice.NewsType] = list;
+                }
+
+                list.Add(notice);
+            }
+
+            PruneFleetNoticeTracking(visibleIds);
+
+            foreach (KeyValuePair<int, List<FleetNoticeSnapshot>> pair in noticesByType)
+            {
+                CondenseFleetNoticeGroup(pair.Key, pair.Value, now);
+            }
+        }
+
+        private FleetNoticeSnapshot ReadFleetNoticeSnapshot(UnityEngine.Object item, float now)
+        {
+            if (item == null || !IsRuntimeObjectActive(item))
+            {
+                return null;
+            }
+
+            object itemData = ReadField(item, "itemData");
+            if (itemData == null)
+            {
+                return null;
+            }
+
+            int id = ReadInt(itemData, "id");
+            if (id <= 0)
+            {
+                return null;
+            }
+
+            float firstSeen;
+            if (!newstickerFirstSeenRealtimeById.TryGetValue(id, out firstSeen) || firstSeen > now)
+            {
+                firstSeen = now;
+                newstickerFirstSeenRealtimeById[id] = firstSeen;
+            }
+
+            FleetNoticeSnapshot notice = new FleetNoticeSnapshot();
+            notice.Item = item;
+            notice.Id = id;
+            notice.NewsType = ReadInt(itemData, "newsType");
+            notice.Headline = ReadString(itemData, "headline");
+            notice.FirstSeenRealtime = firstSeen;
+            return notice;
+        }
+
+        private void CondenseFleetNoticeGroup(int newsType, List<FleetNoticeSnapshot> notices, float now)
+        {
+            int overflow = notices.Count - FleetNotificationMaxVisiblePerType;
+            if (overflow <= 0)
+            {
+                return;
+            }
+
+            notices.Sort(delegate(FleetNoticeSnapshot left, FleetNoticeSnapshot right)
+            {
+                return left.FirstSeenRealtime.CompareTo(right.FirstSeenRealtime);
+            });
+
+            int archived = 0;
+            for (int i = 0; i < notices.Count && archived < overflow; i++)
+            {
+                FleetNoticeSnapshot notice = notices[i];
+                if (now - notice.FirstSeenRealtime < FleetNotificationGraceRealtimeSeconds)
+                {
+                    continue;
+                }
+
+                if (TryArchiveFleetNotice(notice))
+                {
+                    archived++;
+                }
+            }
+
+            if (archived > 0)
+            {
+                AddDecisionLog(string.Format(
+                    "Condensed {0} older {1} notice(s); keeping the newest {2} visible.",
+                    archived,
+                    GetFleetNoticeLabel(newsType),
+                    FleetNotificationMaxVisiblePerType));
+            }
+        }
+
+        private bool TryArchiveFleetNotice(FleetNoticeSnapshot notice)
+        {
+            if (notice == null || notice.Item == null || newstickerMoveToArchiveMethod == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                newstickerMoveToArchiveMethod.Invoke(notice.Item, null);
+                newstickerArchivedIds.Add(notice.Id);
+                newstickerFirstSeenRealtimeById.Remove(notice.Id);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog("Failed to condense " + GetFleetNoticeLabel(notice.NewsType) + " notice: " + UnwrapMessage(ex));
+                return false;
+            }
+        }
+
+        private void PruneFleetNoticeTracking(Dictionary<int, bool> visibleIds)
+        {
+            List<int> staleIds = new List<int>();
+            foreach (KeyValuePair<int, float> pair in newstickerFirstSeenRealtimeById)
+            {
+                if (!visibleIds.ContainsKey(pair.Key))
+                {
+                    staleIds.Add(pair.Key);
+                }
+            }
+
+            for (int i = 0; i < staleIds.Count; i++)
+            {
+                newstickerFirstSeenRealtimeById.Remove(staleIds[i]);
+            }
+
+            staleIds.Clear();
+            foreach (int id in newstickerArchivedIds)
+            {
+                if (!visibleIds.ContainsKey(id))
+                {
+                    staleIds.Add(id);
+                }
+            }
+
+            for (int i = 0; i < staleIds.Count; i++)
+            {
+                newstickerArchivedIds.Remove(staleIds[i]);
+            }
+        }
+
+        private static bool IsConsolidatableFleetNewsType(int newsType)
+        {
+            return newsType == 0 || newsType == 2 || newsType == 3 || newsType == 4;
+        }
+
+        private static string GetFleetNoticeLabel(int newsType)
+        {
+            switch (newsType)
+            {
+                case 0:
+                    return "ship arrival/job feedback";
+                case 2:
+                    return "contraband scanner";
+                case 3:
+                    return "repair complete";
+                case 4:
+                    return "upgrade complete";
+                default:
+                    return "fleet";
+            }
+        }
+
+        private object GetNativeWindow(string identifier)
+        {
+            if (getWindowByIdentifierMethod == null || string.IsNullOrEmpty(identifier))
+            {
+                return null;
+            }
+
+            try
+            {
+                return getWindowByIdentifierMethod.Invoke(null, new object[] { identifier });
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private bool IsNativeWindowOpen(string identifier)
+        {
+            object window = GetNativeWindow(identifier);
+            if (window == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                PropertyInfo property = window.GetType().GetProperty(
+                    "IsOpen",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (property != null)
+                {
+                    return Convert.ToBoolean(property.GetValue(window, null));
+                }
+
+                MethodInfo getter = window.GetType().GetMethod(
+                    "get_IsOpen",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (getter != null)
+                {
+                    return Convert.ToBoolean(getter.Invoke(window, null));
+                }
+            }
+            catch
+            {
+            }
+
+            return IsRuntimeObjectActive(window);
+        }
+
+        private object GetNativeWindowComponent(string identifier, Type componentType)
+        {
+            object window = GetNativeWindow(identifier);
+            Component component = window as Component;
+            if (component != null && componentType != null)
+            {
+                try
+                {
+                    Component found = component.GetComponent(componentType);
+                    if (found != null)
+                    {
+                        return found;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return FindActiveRuntimeObject(componentType);
+        }
+
+        private static object FindActiveRuntimeObject(Type type)
+        {
+            if (type == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                object instance = UnityEngine.Object.FindObjectOfType(type);
+                return IsRuntimeObjectActive(instance) ? instance : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static UnityEngine.Object[] FindRuntimeObjectsOfType(Type type)
+        {
+            if (type == null)
+            {
+                return new UnityEngine.Object[0];
+            }
+
+            try
+            {
+                UnityEngine.Object[] items = UnityEngine.Object.FindObjectsOfType(type);
+                return items == null ? new UnityEngine.Object[0] : items;
+            }
+            catch
+            {
+                return new UnityEngine.Object[0];
+            }
+        }
+
+        private static bool IsRuntimeObjectActive(object instance)
+        {
+            UnityEngine.Object unityObject = instance as UnityEngine.Object;
+            if (unityObject == null)
+            {
+                return false;
+            }
+
+            Component component = instance as Component;
+            if (component != null)
+            {
+                GameObject gameObject = component.gameObject;
+                return gameObject != null && gameObject.activeInHierarchy;
+            }
+
+            GameObject directGameObject = instance as GameObject;
+            return directGameObject != null && directGameObject.activeInHierarchy;
+        }
+
         private void DrawShipRow(ShipSnapshot ship)
         {
             GUILayout.BeginHorizontal();
@@ -568,6 +1071,7 @@ namespace TransOcean2FleetAutomation.Direct
                     new Type[] { typeof(object), cargoEventType, typeof(object) },
                     null);
             }
+            ResolveRuntimeUiHooks();
 
             statusText = "Controllers ready. Toggle ships into TO2 Captain mode.";
             Debug.Log(LogPrefix + " Controllers ready for fleet automation.");
@@ -3599,6 +4103,15 @@ namespace TransOcean2FleetAutomation.Direct
             {
                 return 0L;
             }
+        }
+
+        private sealed class FleetNoticeSnapshot
+        {
+            public UnityEngine.Object Item;
+            public int Id;
+            public int NewsType;
+            public string Headline;
+            public float FirstSeenRealtime;
         }
 
         private sealed class ShipSnapshot
