@@ -155,6 +155,21 @@ Cargo automation is intended to:
 
 After any dispatch or service-dock routing, the mod applies a short per-ship settle cooldown before it will issue another action for that ship. This is meant to avoid double-dispatching while the native database is still updating harbor and destination fields. The cooldown scales down with game speed and clears immediately once the ship is actually idle in a harbor.
 
+### Fuel and stale departure handling (2026-07-12)
+
+Latest log review showed two stuck patterns:
+
+- `#232 Yashamaru` sat in `MINIGAME_CASTOUT` with `CurrentHarbor=GeorgiaPorts` and `DestinationHarbor=NewOrleans`, which means our direct movement call bypassed the base-game UI's fuel preflight and the native departure state never finished.
+- `#1057 Vertigo` was repeatedly held below the repair threshold because no repair dock met the extra 10% arrival-condition cushion, even though lower-arrival zero-sink-risk repair routes may be better than permanent stranding.
+
+Current implementation notes:
+
+- `EnsureFuelForDeparture(...)` now runs before contract dispatch, service-dock direct routing, and idle repositioning.
+- Fuel need is estimated with native `ShipFactory.GetRemainingFuelOnArrival(speed, ship, start, destination, fullTank)` using `GetActualSpeedInKnotsOfShip`. If the current tank would arrive below a 3% capacity reserve, the mod tops up just enough (capped at tank capacity).
+- Refueling uses native economy plumbing: write the target `FuelLoaded` to the live `DynamicTablePlayerShips` object, then call `ShipFactory.RefuelPlayerShip(ship, cost)` so the game persists fuel and deducts credits. Cost uses `DynamicSQLiteController.GetHarborFuelPrice(currentHarbor).Price`; no free DB fuel write is used.
+- If a ship is still in `MINIGAME_CASTOUT` after the normal dispatch settle window, `TryRecoverStaleCastOut(...)` verifies/refuels and retries the same already-set destination, with a 20-real-second cooldown.
+- Repair dock selection still prefers the nearest dock that satisfies the sink-risk threshold plus 10% cushion. If none exists, it can pick the best zero-native-sink-risk emergency dock below that cushion and logs `emergency repair routing`.
+
 If an enabled ship disappears from `GetALLPlayerShips`, the next active fleet refresh logs `enabled ship is missing from the native player ship list`. The July 2026 short run showed `#1976 Skaald` drop out this way after native logs said `GetPlayerIDFromPlayerShip - PlayerShip in playerShips database not found. PlayerShipID: 1976`; an earlier run showed the same signature for `#3201 Lorken`.
 
 The route lookahead is intentionally advisory. It does not accept future-harbor jobs early and it does not mix cargo for multiple destinations into one native route. It only nudges the first destination toward harbors with better follow-on work, then lets the next automation tick re-evaluate after arrival.

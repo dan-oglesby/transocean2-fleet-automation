@@ -52,6 +52,8 @@ namespace TransOcean2FleetAutomation.Direct
         private const float FleetNotificationScanRealtimeSeconds = 4f;
         private const float FleetNotificationGraceRealtimeSeconds = 90f;
         private const int FleetNotificationMaxVisiblePerType = 3;
+        private const float DispatchFuelReserveCapacityFraction = 0.03f;
+        private const float StaleCastOutRecoveryCooldownSeconds = 20f;
         private const float MinSailConditionFloor = 1f;
         private const float MinSailConditionCeiling = 99f;
         private const float IdleRepositionDefaultDays = 7f;
@@ -74,6 +76,7 @@ namespace TransOcean2FleetAutomation.Direct
 
         private readonly Dictionary<int, bool> captainEnabledByShipId = new Dictionary<int, bool>();
         private readonly Dictionary<int, float> lastDispatchRealtimeByShipId = new Dictionary<int, float>();
+        private readonly Dictionary<int, float> lastCastOutRecoveryRealtimeByShipId = new Dictionary<int, float>();
         private readonly Dictionary<int, string> lastSeenShipNameById = new Dictionary<int, string>();
         private readonly Dictionary<int, bool> missingShipWarnedByShipId = new Dictionary<int, bool>();
         private readonly Dictionary<int, DateTime> idleSinceGameDateByShipId = new Dictionary<int, DateTime>();
@@ -95,6 +98,7 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getAllPlayerShipsMethod;
         private MethodInfo getPlayerShipMethod;
         private MethodInfo getAllJobsFromPlayerShipMethod;
+        private MethodInfo getHarborFuelPriceMethod;
         private MethodInfo getJobsFromStartHarborMethod;
         private MethodInfo getHarborMethod;
         private MethodInfo getFreightAttributesMethod;
@@ -116,6 +120,9 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getUpgradeDockOwnerMethod;
         private MethodInfo sendShipToDestinationMethod;
         private MethodInfo getRemainingConditionOnArrivalMethod;
+        private MethodInfo getRemainingFuelOnArrivalMethod;
+        private MethodInfo refuelPlayerShipMethod;
+        private MethodInfo getActualSpeedInKnotsOfShipMethod;
         private MethodInfo unloadCommissionsFromShipMethod;
         private MethodInfo getShipSinkChanceMethod;
         private MethodInfo getDaysForRepairMethod;
@@ -1023,6 +1030,7 @@ namespace TransOcean2FleetAutomation.Direct
             getAllPlayerShipsMethod = dsqLiteType.GetMethod("GetALLPlayerShips", new Type[] { typeof(int) });
             getPlayerShipMethod = dsqLiteType.GetMethod("GetPlayerShip", new Type[] { typeof(int) });
             getAllJobsFromPlayerShipMethod = dsqLiteType.GetMethod("GetAllJobsFromPlayerShip", new Type[] { typeof(int) });
+            getHarborFuelPriceMethod = dsqLiteType.GetMethod("GetHarborFuelPrice", new Type[] { typeof(string) });
             updatePlayerShipAiStateMethod = dsqLiteType.GetMethod("UpdatePlayerShipAiState", new Type[] { typeof(int), typeof(bool) });
             updateJobPlayerShipMethod = dsqLiteType.GetMethod("UpdatePlayerShipIDFromJob", new Type[] { typeof(int), typeof(int) });
             setShipDontLoadJobsMethod = dsqLiteType.GetMethod("SetPlayerShipAIStateDontLoadJobs", new Type[] { typeof(int), typeof(bool) });
@@ -1053,8 +1061,15 @@ namespace TransOcean2FleetAutomation.Direct
                 getRemainingConditionOnArrivalMethod = shipFactoryType.GetMethod(
                     "GetRemainingConditionOnArrival",
                     new Type[] { playerShipsType, typeof(string), typeof(string) });
+                getRemainingFuelOnArrivalMethod = shipFactoryType.GetMethod(
+                    "GetRemainingFuelOnArrival",
+                    new Type[] { typeof(float), playerShipsType, typeof(string), typeof(string), typeof(bool) });
+                refuelPlayerShipMethod = shipFactoryType.GetMethod(
+                    "RefuelPlayerShip",
+                    new Type[] { playerShipsType, typeof(long) });
             }
             sendShipToDestinationMethod = shipFactoryType.GetMethod("SendShipToDestination", new Type[] { typeof(int), typeof(string) });
+            getActualSpeedInKnotsOfShipMethod = shipFactoryType.GetMethod("GetActualSpeedInKnotsOfShip", new Type[] { typeof(int), typeof(bool) });
             unloadCommissionsFromShipMethod = null;
             if (commissionFactory != null)
             {
@@ -1218,6 +1233,11 @@ namespace TransOcean2FleetAutomation.Direct
             if (IsDispatchSettling(ship))
             {
                 AddDecisionLog(prefix + "waiting for recent dispatch state to settle before taking another action.");
+                return;
+            }
+
+            if (TryRecoverStaleCastOut(ship, prefix))
+            {
                 return;
             }
 
@@ -1809,6 +1829,15 @@ namespace TransOcean2FleetAutomation.Direct
                 return false;
             }
 
+            if (destination.EmergencySafetyFallback)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "emergency repair routing: no dock meets the {0:0}% travel cushion, using {1} with about {2:0}% condition on arrival and zero native sink chance.",
+                    repairTravelSafetyFloor,
+                    destination.Harbor,
+                    destination.ArrivalCondition));
+            }
+
             return TrySendToServiceDock(ship, prefix, "repair", destination.Harbor, destination.Distance, destination.ArrivalCondition);
         }
 
@@ -1830,6 +1859,11 @@ namespace TransOcean2FleetAutomation.Direct
                 }
 
                 AddDecisionLog(prefix + serviceName + " cargo offset dispatch failed; trying direct service routing.");
+            }
+
+            if (!EnsureFuelForDeparture(ship, harbor, prefix))
+            {
+                return false;
             }
 
             try
@@ -1885,6 +1919,7 @@ namespace TransOcean2FleetAutomation.Direct
             object rawShip = GetLatestRawShip(ship);
             float safeArrivalFloor = repairTravelSafetyFloor;
             RepairDockCandidate best = null;
+            RepairDockCandidate emergency = null;
             foreach (object harbor in harbors)
             {
                 string city = ReadString(harbor, "City");
@@ -1915,27 +1950,35 @@ namespace TransOcean2FleetAutomation.Direct
                 }
 
                 float arrivalCondition = GetRemainingConditionOnArrival(rawShip, ship, city);
-                if (arrivalCondition < safeArrivalFloor)
-                {
-                    continue;
-                }
-
                 int sinkChance = GetShipSinkChance(arrivalCondition);
                 if (sinkChance > 0)
                 {
                     continue;
                 }
 
-                if (best == null || distance < best.Distance)
+                if (arrivalCondition >= safeArrivalFloor)
                 {
-                    best = new RepairDockCandidate();
-                    best.Harbor = city;
-                    best.Distance = distance;
-                    best.ArrivalCondition = arrivalCondition;
+                    if (best == null || distance < best.Distance)
+                    {
+                        best = new RepairDockCandidate();
+                        best.Harbor = city;
+                        best.Distance = distance;
+                        best.ArrivalCondition = arrivalCondition;
+                    }
+                }
+                else if (emergency == null
+                    || arrivalCondition > emergency.ArrivalCondition
+                    || (Math.Abs(arrivalCondition - emergency.ArrivalCondition) < 0.1f && distance < emergency.Distance))
+                {
+                    emergency = new RepairDockCandidate();
+                    emergency.Harbor = city;
+                    emergency.Distance = distance;
+                    emergency.ArrivalCondition = arrivalCondition;
+                    emergency.EmergencySafetyFallback = true;
                 }
             }
 
-            return best;
+            return best ?? emergency;
         }
 
         // Called when a ship is idle in a harbor with no legal work. After the ship has waited past the
@@ -2100,6 +2143,11 @@ namespace TransOcean2FleetAutomation.Direct
             if (sendShipToDestinationMethod == null)
             {
                 AddDecisionLog(prefix + "cannot reposition; native movement bridge is unavailable.");
+                return false;
+            }
+
+            if (!EnsureFuelForDeparture(ship, harbor, prefix))
+            {
                 return false;
             }
 
@@ -2467,6 +2515,193 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return condition <= 0f ? 100 : 0;
+        }
+
+        private bool EnsureFuelForDeparture(ShipSnapshot ship, string destinationHarbor, string prefix)
+        {
+            if (ship == null
+                || !HasKnownCurrentHarbor(ship)
+                || IsNoneOrEmpty(destinationHarbor)
+                || destinationHarbor == ship.CurrentHarbor)
+            {
+                return true;
+            }
+
+            object rawShip = GetLatestRawShip(ship);
+            if (rawShip == null || getRemainingFuelOnArrivalMethod == null)
+            {
+                return true;
+            }
+
+            float capacity = ReadFloat(rawShip, "FuelCapacity");
+            if (capacity <= 0f)
+            {
+                return true;
+            }
+
+            double remainingFuel = GetRemainingFuelOnArrivalEstimate(rawShip, ship, destinationHarbor, false);
+            if (double.IsNaN(remainingFuel) || double.IsInfinity(remainingFuel))
+            {
+                return true;
+            }
+
+            float reserveFuel = Mathf.Max(1f, capacity * DispatchFuelReserveCapacityFraction);
+            if (remainingFuel >= reserveFuel)
+            {
+                return true;
+            }
+
+            double fullTankRemaining = GetRemainingFuelOnArrivalEstimate(rawShip, ship, destinationHarbor, true);
+            if (!double.IsNaN(fullTankRemaining) && !double.IsInfinity(fullTankRemaining) && fullTankRemaining <= 0d)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "cannot depart for {0}; even a full tank would arrive with {1:0} fuel.",
+                    destinationHarbor,
+                    fullTankRemaining));
+                return false;
+            }
+
+            if (refuelPlayerShipMethod == null || getHarborFuelPriceMethod == null)
+            {
+                AddDecisionLog(prefix + "needs fuel before departure, but the native refuel bridge is unavailable.");
+                return false;
+            }
+
+            float loadedFuel = Mathf.Clamp(ReadFloat(rawShip, "FuelLoaded"), 0f, capacity);
+            float targetFuel = Mathf.Min(capacity, (float)(loadedFuel - remainingFuel) + reserveFuel);
+            bool fullTankHasSlimReserve = !double.IsNaN(fullTankRemaining)
+                && !double.IsInfinity(fullTankRemaining)
+                && fullTankRemaining > 0d
+                && fullTankRemaining < reserveFuel;
+            if (fullTankHasSlimReserve)
+            {
+                targetFuel = capacity;
+            }
+
+            targetFuel = Mathf.Clamp(targetFuel, loadedFuel, capacity);
+            float tonsToBuy = Mathf.Ceil(targetFuel - loadedFuel);
+            if (tonsToBuy <= 0.1f)
+            {
+                return true;
+            }
+
+            targetFuel = Mathf.Min(capacity, loadedFuel + tonsToBuy);
+            long pricePerTon = GetFuelPricePerTon(ship.CurrentHarbor);
+            if (pricePerTon <= 0L)
+            {
+                AddDecisionLog(prefix + "needs fuel before departure, but no fuel price is available at " + ship.CurrentHarbor + ".");
+                return false;
+            }
+
+            long cost = pricePerTon * (long)Math.Ceiling(tonsToBuy);
+            if (cost > playerCredits)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "needs {0:0} tons of fuel before sailing to {1}, but treasury {2:n0} cannot cover estimated fuel cost {3:n0}.",
+                    tonsToBuy,
+                    destinationHarbor,
+                    playerCredits,
+                    cost));
+                return false;
+            }
+
+            float previousFuel = ReadFloat(rawShip, "FuelLoaded");
+            try
+            {
+                WriteField(rawShip, "FuelLoaded", targetFuel);
+                if (ship.RawShip != null && !object.ReferenceEquals(rawShip, ship.RawShip))
+                {
+                    WriteField(ship.RawShip, "FuelLoaded", targetFuel);
+                }
+
+                refuelPlayerShipMethod.Invoke(shipFactory, new object[] { rawShip, cost });
+                ship.FuelLoaded = targetFuel;
+                playerCredits = Math.Max(0L, playerCredits - cost);
+
+                double projectedArrivalFuel = remainingFuel + (targetFuel - loadedFuel);
+                string reserveNote = fullTankHasSlimReserve ? " Full tank still leaves a slim arrival reserve." : string.Empty;
+                AddDecisionLog(prefix + string.Format(
+                    "refueled {0:0} tons at {1} before sailing to {2}; cost {3:n0}, projected arrival fuel {4:0}.{5}",
+                    tonsToBuy,
+                    ship.CurrentHarbor,
+                    destinationHarbor,
+                    cost,
+                    projectedArrivalFuel,
+                    reserveNote));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                WriteField(rawShip, "FuelLoaded", previousFuel);
+                if (ship.RawShip != null && !object.ReferenceEquals(rawShip, ship.RawShip))
+                {
+                    WriteField(ship.RawShip, "FuelLoaded", previousFuel);
+                }
+
+                AddDecisionLog(prefix + "refuel preflight failed before departure: " + UnwrapMessage(ex));
+                return false;
+            }
+        }
+
+        private double GetRemainingFuelOnArrivalEstimate(object rawShip, ShipSnapshot ship, string destinationHarbor, bool fullTank)
+        {
+            if (rawShip == null || ship == null || getRemainingFuelOnArrivalMethod == null)
+            {
+                return double.NaN;
+            }
+
+            try
+            {
+                float speed = GetActualSpeedInKnots(ship, rawShip);
+                return Convert.ToDouble(getRemainingFuelOnArrivalMethod.Invoke(
+                    shipFactory,
+                    new object[] { speed, rawShip, ship.CurrentHarbor, destinationHarbor, fullTank }));
+            }
+            catch
+            {
+                return double.NaN;
+            }
+        }
+
+        private float GetActualSpeedInKnots(ShipSnapshot ship, object rawShip)
+        {
+            if (getActualSpeedInKnotsOfShipMethod != null && ship != null)
+            {
+                try
+                {
+                    float speed = Convert.ToSingle(getActualSpeedInKnotsOfShipMethod.Invoke(
+                        shipFactory,
+                        new object[] { ship.PlayerShipId, false }));
+                    if (speed > 0f)
+                    {
+                        return speed;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            float fallbackSpeed = ReadFloat(rawShip, "SpeedMax");
+            return fallbackSpeed > 0f ? fallbackSpeed : 1f;
+        }
+
+        private long GetFuelPricePerTon(string harborName)
+        {
+            if (getHarborFuelPriceMethod == null || string.IsNullOrEmpty(harborName) || harborName == "None")
+            {
+                return 0L;
+            }
+
+            try
+            {
+                object price = getHarborFuelPriceMethod.Invoke(dsqLite, new object[] { harborName });
+                return ReadLong(price, "Price");
+            }
+            catch
+            {
+                return 0L;
+            }
         }
 
         private void RefreshRepairTravelSafetyFloor()
@@ -3588,6 +3823,12 @@ namespace TransOcean2FleetAutomation.Direct
                 return false;
             }
 
+            string prefix = string.Format("#{0} {1}: ", ship.PlayerShipId, ship.Name);
+            if (!EnsureFuelForDeparture(ship, plan.End, prefix))
+            {
+                return false;
+            }
+
             try
             {
                 SetNativeAiState(ship, false);
@@ -3655,6 +3896,71 @@ namespace TransOcean2FleetAutomation.Direct
                 AddDecisionLog(string.Format("#{0} {1}: direct dispatch failed: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
                 return false;
             }
+        }
+
+        private bool TryRecoverStaleCastOut(ShipSnapshot ship, string prefix)
+        {
+            if (!IsStaleCastOutState(ship))
+            {
+                return false;
+            }
+
+            float now = Time.realtimeSinceStartup;
+            float lastRecovery;
+            if (lastCastOutRecoveryRealtimeByShipId.TryGetValue(ship.PlayerShipId, out lastRecovery)
+                && now - lastRecovery < StaleCastOutRecoveryCooldownSeconds)
+            {
+                return true;
+            }
+
+            lastCastOutRecoveryRealtimeByShipId[ship.PlayerShipId] = now;
+            string destination = ship.DestinationHarbor;
+            if (!EnsureFuelForDeparture(ship, destination, prefix))
+            {
+                return true;
+            }
+
+            bool sent = false;
+            try
+            {
+                SetNativeAiState(ship, false);
+                SetNativeDestinationHarbor(ship, destination);
+                if (sendShipToDestinationMethod != null)
+                {
+                    sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, destination });
+                    sent = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(prefix + "stale cast-out direct retry failed: " + UnwrapMessage(ex));
+            }
+
+            if (!sent)
+            {
+                sent = SendCargoEvent("SHIP_CAST_IN_DONE", ship.PlayerShipId);
+            }
+
+            if (sent)
+            {
+                MarkShipDispatched(ship);
+                AddDecisionLog(prefix + "retried departure to " + destination + " after stale cast-out state.");
+            }
+            else
+            {
+                AddDecisionLog(prefix + "stale cast-out recovery could not trigger departure to " + destination + ".");
+            }
+
+            return true;
+        }
+
+        private static bool IsStaleCastOutState(ShipSnapshot ship)
+        {
+            return ship != null
+                && HasKnownCurrentHarbor(ship)
+                && HasActiveDestination(ship)
+                && !string.IsNullOrEmpty(ship.Status)
+                && string.Equals(ship.Status, "MINIGAME_CASTOUT", StringComparison.OrdinalIgnoreCase);
         }
 
         private bool IsShipIdleInHarbor(ShipSnapshot ship)
@@ -4607,6 +4913,7 @@ namespace TransOcean2FleetAutomation.Direct
             public string Harbor;
             public float Distance;
             public float ArrivalCondition;
+            public bool EmergencySafetyFallback;
         }
 
         private sealed class UpgradePlan
