@@ -1321,9 +1321,9 @@ namespace TransOcean2FleetAutomation.Direct
                 }
             }
 
-            if (jobsAtCurrentHarbor == onboardJobs.Count)
+            if (jobsAtCurrentHarbor > 0)
             {
-                TryUnloadOnboardCargoAtCurrentHarbor(ship, prefix, onboardJobs);
+                TryUnloadOnboardCargoAtCurrentHarbor(ship, prefix, onboardJobs, jobsAtCurrentHarbor);
                 return true;
             }
 
@@ -1354,6 +1354,22 @@ namespace TransOcean2FleetAutomation.Direct
                 return true;
             }
 
+            JobPlan topUpPlan = FindTopUpPlanForOnboardDestination(ship, destination, onboardJobs);
+            if (topUpPlan != null)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "onboard cargo top-up: adding {0} job(s), {1:n0} pay, toward {2} before finishing existing cargo.",
+                    topUpPlan.Jobs.Count,
+                    topUpPlan.Payment,
+                    destination.Harbor));
+                if (DispatchJobPlan(ship, topUpPlan, "onboard cargo top-up"))
+                {
+                    return true;
+                }
+
+                AddDecisionLog(prefix + "onboard cargo top-up failed; routing existing onboard cargo only.");
+            }
+
             try
             {
                 SetNativeAiState(ship, false);
@@ -1379,6 +1395,44 @@ namespace TransOcean2FleetAutomation.Direct
                     UnwrapMessage(ex)));
                 return true;
             }
+        }
+
+        private JobPlan FindTopUpPlanForOnboardDestination(ShipSnapshot ship, OnboardDestinationSummary destination, List<OnboardJobInfo> onboardJobs)
+        {
+            if (ship == null || destination == null || onboardJobs == null || IsNoneOrEmpty(ship.CurrentHarbor) || IsNoneOrEmpty(destination.Harbor))
+            {
+                return null;
+            }
+
+            int reservedVolume = GetOnboardVolume(onboardJobs);
+            int reservedWeight = GetOnboardWeight(onboardJobs);
+            if ((ship.Volume > 0 && reservedVolume >= ship.Volume) || (ship.DeadweightTons > 0 && reservedWeight >= ship.DeadweightTons))
+            {
+                return null;
+            }
+
+            int contrabandSkipped = 0;
+            int candidateCount = 0;
+            Dictionary<string, List<JobCandidate>> candidatesByDestination = CollectJobCandidatesFromHarbor(ship, ship.CurrentHarbor, out contrabandSkipped, out candidateCount);
+            if (candidatesByDestination == null)
+            {
+                return null;
+            }
+
+            List<JobCandidate> candidates;
+            if (!candidatesByDestination.TryGetValue(destination.Harbor, out candidates))
+            {
+                return null;
+            }
+
+            JobPlan plan = BuildJobPlanForDestination(ship, ship.CurrentHarbor, destination.Harbor, candidates, reservedVolume, reservedWeight);
+            if (plan != null)
+            {
+                plan.ContrabandSkipped = contrabandSkipped;
+                plan.CandidateCount = candidateCount;
+            }
+
+            return plan;
         }
 
         private List<OnboardJobInfo> GetOnboardJobs(ShipSnapshot ship)
@@ -1431,13 +1485,13 @@ namespace TransOcean2FleetAutomation.Direct
             return jobs;
         }
 
-        private bool TryUnloadOnboardCargoAtCurrentHarbor(ShipSnapshot ship, string prefix, List<OnboardJobInfo> onboardJobs)
+        private bool TryUnloadOnboardCargoAtCurrentHarbor(ShipSnapshot ship, string prefix, List<OnboardJobInfo> onboardJobs, int deliverableJobCount)
         {
             if (unloadCommissionsFromShipMethod == null || commissionFactory == null)
             {
                 AddDecisionLog(prefix + string.Format(
-                    "holding; {0} onboard job(s) are at {1}, but the native unload bridge is unavailable.",
-                    onboardJobs.Count,
+                    "holding; {0} onboard job(s) are deliverable at {1}, but the native unload bridge is unavailable.",
+                    deliverableJobCount,
                     ship.CurrentHarbor));
                 return false;
             }
@@ -1453,8 +1507,8 @@ namespace TransOcean2FleetAutomation.Direct
                 }
 
                 AddDecisionLog(prefix + string.Format(
-                    "onboard cargo guard: forced native unload of {0} assigned job(s) at {1} before taking new work.",
-                    onboardJobs.Count,
+                    "onboard cargo guard: forced native unload of {0} deliverable job(s) at {1} before taking new work.",
+                    deliverableJobCount,
                     ship.CurrentHarbor));
                 return true;
             }
@@ -1508,6 +1562,38 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             return best;
+        }
+
+        private static int GetOnboardVolume(List<OnboardJobInfo> jobs)
+        {
+            int volume = 0;
+            if (jobs == null)
+            {
+                return volume;
+            }
+
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                volume += Math.Max(0, jobs[i].Volume);
+            }
+
+            return volume;
+        }
+
+        private static int GetOnboardWeight(List<OnboardJobInfo> jobs)
+        {
+            int weight = 0;
+            if (jobs == null)
+            {
+                return weight;
+            }
+
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                weight += Math.Max(0, jobs[i].Weight);
+            }
+
+            return weight;
         }
 
         private static bool SameHarbor(string left, string right)
@@ -3364,6 +3450,11 @@ namespace TransOcean2FleetAutomation.Direct
 
         private static JobPlan BuildJobPlanForDestination(ShipSnapshot ship, string startHarbor, string destination, List<JobCandidate> candidates)
         {
+            return BuildJobPlanForDestination(ship, startHarbor, destination, candidates, 0, 0);
+        }
+
+        private static JobPlan BuildJobPlanForDestination(ShipSnapshot ship, string startHarbor, string destination, List<JobCandidate> candidates, int reservedVolume, int reservedWeight)
+        {
             if (candidates == null || candidates.Count == 0 || string.IsNullOrEmpty(destination))
             {
                 return null;
@@ -3385,6 +3476,8 @@ namespace TransOcean2FleetAutomation.Direct
             JobPlan current = new JobPlan();
             current.Start = startHarbor;
             current.End = destination;
+            current.ReservedVolume = Math.Max(0, reservedVolume);
+            current.ReservedWeight = Math.Max(0, reservedWeight);
             JobPlan best = null;
             SearchPackedJobPlan(ship, rankedCandidates, remainingScore, 0, current, ref best);
             return best;
@@ -3461,12 +3554,20 @@ namespace TransOcean2FleetAutomation.Direct
 
         private static bool CanAddCandidateToPlan(ShipSnapshot ship, JobPlan plan, JobCandidate candidate)
         {
-            if (ship.Volume > 0 && plan.Volume + candidate.Volume > ship.Volume)
+            if (ship == null || plan == null || candidate == null)
             {
                 return false;
             }
 
-            if (ship.DeadweightTons > 0 && plan.Weight + candidate.Weight > ship.DeadweightTons)
+            int reservedVolume = plan == null ? 0 : Math.Max(0, plan.ReservedVolume);
+            int reservedWeight = plan == null ? 0 : Math.Max(0, plan.ReservedWeight);
+
+            if (ship.Volume > 0 && reservedVolume + plan.Volume + candidate.Volume > ship.Volume)
+            {
+                return false;
+            }
+
+            if (ship.DeadweightTons > 0 && reservedWeight + plan.Weight + candidate.Weight > ship.DeadweightTons)
             {
                 return false;
             }
@@ -4650,6 +4751,8 @@ namespace TransOcean2FleetAutomation.Direct
             public readonly List<JobCandidate> Jobs = new List<JobCandidate>();
             public string Start;
             public string End;
+            public int ReservedVolume;
+            public int ReservedWeight;
             public int Volume;
             public int Weight;
             public long Payment;
@@ -4730,6 +4833,8 @@ namespace TransOcean2FleetAutomation.Direct
                 JobPlan clone = new JobPlan();
                 clone.Start = Start;
                 clone.End = End;
+                clone.ReservedVolume = ReservedVolume;
+                clone.ReservedWeight = ReservedWeight;
                 for (int i = 0; i < Jobs.Count; i++)
                 {
                     clone.Add(Jobs[i]);
