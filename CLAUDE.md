@@ -125,6 +125,17 @@ Next useful increments:
 
 Re-evaluation already happens each time a ship is idle in a harbor (scheduled tick, F8, or the per-ship Plan button), so ships take on fresh contracts every time they dock. Same-destination jobs are bundled into one native route (`BuildJobPlanForDestination`), and the route lookahead steers the chosen first leg toward harbors that have strong follow-on bundles.
 
+### Stale onboard cargo guard (July 2026 update)
+
+The July 11 run showed a likely stale-cargo pattern around `#4859 Shark`: it loaded Capetown -> Durban jobs, later kept accepting new work, and the user observed Durban cargo occupying space for a long in-game stretch. The fix is intentionally conservative:
+
+- `JobCandidate.From` now treats only `PlayerShipID == 0` or `PlayerShipID == 1` as available work. Jobs already assigned to the current ship are not packed into new plans.
+- `TryResolveOnboardCargoBeforeAutomation` runs after the ship is confirmed idle in a real harbor and before upgrade/contract decisions.
+- It reads native onboard contracts with `DynamicSQLiteController.GetAllJobsFromPlayerShip(playerShipId)`.
+- If every assigned job ends at the current harbor, it invokes native `Cargo.Commissions.CommissionFactory.UnloadCommissionsFromShip(playerShipId)` and stops the automation tick so the next tick sees the cleaned state.
+- If assigned jobs point somewhere else, the ship sets `DontLoadJobs`, writes `GlobalDestination`/`DestinationHarbor`, and sails to that outstanding cargo destination before accepting new contracts.
+- If the unload or movement bridge is unavailable, automation holds the ship rather than adding more cargo on top of stale assignments.
+
 Note on "cargo that is on the way": the native routing model is **single-destination** — a ship dispatched to harbor B cannot drop cargo at an intermediate harbor A en route. So true multi-stop / short-leg unloading is not implemented; doing it safely would require driving the native waypoint system (upgrade ID 5, `HasWaypointUpgrade`) and per-leg cargo assignment, which risks corrupting native route state. Until that is proven safe, "on the way" is approximated by (a) bundling everything bound for the same destination and (b) chain-scoring toward job-rich onward harbors, then re-planning on arrival.
 
 Repair and upgrade repositioning tries to pay for itself: before sending a ship to the chosen service port, the mod looks for legal same-destination jobs ending at that repair/upgrade harbor. If matching cargo fits, it dispatches with those jobs attached; otherwise it deadheads to the service port.

@@ -89,10 +89,12 @@ namespace TransOcean2FleetAutomation.Direct
         private object dsqLite;
         private object staticSqLite;
         private object shipFactory;
+        private object commissionFactory;
         private MethodInfo getPlayerIdMethod;
         private MethodInfo getPlayerCreditsMethod;
         private MethodInfo getAllPlayerShipsMethod;
         private MethodInfo getPlayerShipMethod;
+        private MethodInfo getAllJobsFromPlayerShipMethod;
         private MethodInfo getJobsFromStartHarborMethod;
         private MethodInfo getHarborMethod;
         private MethodInfo getFreightAttributesMethod;
@@ -114,6 +116,7 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getUpgradeDockOwnerMethod;
         private MethodInfo sendShipToDestinationMethod;
         private MethodInfo getRemainingConditionOnArrivalMethod;
+        private MethodInfo unloadCommissionsFromShipMethod;
         private MethodInfo getShipSinkChanceMethod;
         private MethodInfo getDaysForRepairMethod;
         private MethodInfo getCurrentDateTimeMethod;
@@ -1006,6 +1009,7 @@ namespace TransOcean2FleetAutomation.Direct
             dsqLite = FindController("Cargo.DynamicSQLiteController", "Database");
             staticSqLite = FindController("Cargo.StaticSQLiteController", "Database");
             shipFactory = FindController("Cargo.ShipFactory", "ShipFactory");
+            commissionFactory = FindController("Cargo.Commissions.CommissionFactory", null);
 
             if (!ControllersReady)
             {
@@ -1018,6 +1022,7 @@ namespace TransOcean2FleetAutomation.Direct
             getPlayerCreditsMethod = dsqLiteType.GetMethod("GetPlayerCredits", new Type[] { typeof(int) });
             getAllPlayerShipsMethod = dsqLiteType.GetMethod("GetALLPlayerShips", new Type[] { typeof(int) });
             getPlayerShipMethod = dsqLiteType.GetMethod("GetPlayerShip", new Type[] { typeof(int) });
+            getAllJobsFromPlayerShipMethod = dsqLiteType.GetMethod("GetAllJobsFromPlayerShip", new Type[] { typeof(int) });
             updatePlayerShipAiStateMethod = dsqLiteType.GetMethod("UpdatePlayerShipAiState", new Type[] { typeof(int), typeof(bool) });
             updateJobPlayerShipMethod = dsqLiteType.GetMethod("UpdatePlayerShipIDFromJob", new Type[] { typeof(int), typeof(int) });
             setShipDontLoadJobsMethod = dsqLiteType.GetMethod("SetPlayerShipAIStateDontLoadJobs", new Type[] { typeof(int), typeof(bool) });
@@ -1050,6 +1055,11 @@ namespace TransOcean2FleetAutomation.Direct
                     new Type[] { playerShipsType, typeof(string), typeof(string) });
             }
             sendShipToDestinationMethod = shipFactoryType.GetMethod("SendShipToDestination", new Type[] { typeof(int), typeof(string) });
+            unloadCommissionsFromShipMethod = null;
+            if (commissionFactory != null)
+            {
+                unloadCommissionsFromShipMethod = commissionFactory.GetType().GetMethod("UnloadCommissionsFromShip", new Type[] { typeof(int) });
+            }
             upgradePlayerShipMethod = shipFactoryType.GetMethod("UpgradePlayerShip", new Type[] { typeof(int), typeof(int), typeof(int), typeof(int), typeof(long) });
             getUpgradeDockOwnerMethod = shipFactoryType.GetMethod("GetUpgradeDockOwner", new Type[] { typeof(int) });
             getShipSinkChanceMethod = shipFactoryType.GetMethod("GetShipSinkChance", new Type[] { typeof(int), typeof(float) });
@@ -1222,6 +1232,11 @@ namespace TransOcean2FleetAutomation.Direct
                 SetNativeAiState(ship, false);
             }
 
+            if (TryResolveOnboardCargoBeforeAutomation(ship, prefix))
+            {
+                return;
+            }
+
             if (ship.Condition < minimumSailCondition + 5f && playerCredits > reserve * 2L)
             {
                 AddDecisionLog(prefix + string.Format("maintenance soon: condition {0:0}% is close to sail minimum {1:0}%.", ship.Condition, minimumSailCondition));
@@ -1287,6 +1302,219 @@ namespace TransOcean2FleetAutomation.Direct
             }
 
             AddDecisionLog(prefix + "live dispatch held so native AI cannot choose blocked cargo.");
+        }
+
+        private bool TryResolveOnboardCargoBeforeAutomation(ShipSnapshot ship, string prefix)
+        {
+            List<OnboardJobInfo> onboardJobs = GetOnboardJobs(ship);
+            if (onboardJobs.Count == 0)
+            {
+                return false;
+            }
+
+            int jobsAtCurrentHarbor = 0;
+            for (int i = 0; i < onboardJobs.Count; i++)
+            {
+                if (SameHarbor(onboardJobs[i].End, ship.CurrentHarbor))
+                {
+                    jobsAtCurrentHarbor++;
+                }
+            }
+
+            if (jobsAtCurrentHarbor == onboardJobs.Count)
+            {
+                TryUnloadOnboardCargoAtCurrentHarbor(ship, prefix, onboardJobs);
+                return true;
+            }
+
+            OnboardDestinationSummary destination = ChooseOnboardCargoDestination(ship, onboardJobs);
+            if (destination == null || IsNoneOrEmpty(destination.Harbor))
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "holding; {0} assigned onboard job(s) are present but no valid destination could be resolved.",
+                    onboardJobs.Count));
+                return true;
+            }
+
+            if (!liveActions)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "onboard cargo guard: {0} assigned job(s) still need {1}; live actions are OFF.",
+                    onboardJobs.Count,
+                    destination.Harbor));
+                return true;
+            }
+
+            if (sendShipToDestinationMethod == null)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "holding; {0} onboard job(s) still need {1}, but the native movement bridge is unavailable.",
+                    onboardJobs.Count,
+                    destination.Harbor));
+                return true;
+            }
+
+            try
+            {
+                SetNativeAiState(ship, false);
+                SetNativeCargoGuard(ship, true, destination.Harbor);
+                SetNativeDestinationHarbor(ship, destination.Harbor);
+                sendShipToDestinationMethod.Invoke(shipFactory, new object[] { ship.PlayerShipId, destination.Harbor });
+                ship.DestinationHarbor = destination.Harbor;
+                ClearPlannedFreightUpgrade(ship);
+                MarkShipDispatched(ship);
+                AddDecisionLog(prefix + string.Format(
+                    "onboard cargo guard: sailing to {0} to finish {1} assigned job(s), {2:n0} volume, {3:n0} weight, before accepting new work.",
+                    destination.Harbor,
+                    destination.JobCount,
+                    destination.Volume,
+                    destination.Weight));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "holding; failed to route onboard cargo to {0}: {1}",
+                    destination.Harbor,
+                    UnwrapMessage(ex)));
+                return true;
+            }
+        }
+
+        private List<OnboardJobInfo> GetOnboardJobs(ShipSnapshot ship)
+        {
+            List<OnboardJobInfo> jobs = new List<OnboardJobInfo>();
+            if (ship == null || getAllJobsFromPlayerShipMethod == null)
+            {
+                return jobs;
+            }
+
+            object rawJobs = null;
+            try
+            {
+                rawJobs = getAllJobsFromPlayerShipMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId });
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(string.Format("#{0} {1}: onboard cargo lookup failed: {2}", ship.PlayerShipId, ship.Name, UnwrapMessage(ex)));
+                return jobs;
+            }
+
+            IEnumerable enumerable = rawJobs as IEnumerable;
+            if (enumerable == null)
+            {
+                return jobs;
+            }
+
+            foreach (object rawJob in enumerable)
+            {
+                if (rawJob == null || ReadInt(rawJob, "PlayerShipID") != ship.PlayerShipId)
+                {
+                    continue;
+                }
+
+                OnboardJobInfo job = new OnboardJobInfo();
+                job.JobId = ReadInt(rawJob, "JobID");
+                job.Start = ReadString(rawJob, "Start");
+                job.End = ReadString(rawJob, "End");
+                job.Freight = ReadString(rawJob, "Freight");
+                job.Volume = ReadInt(rawJob, "Volume");
+                job.Weight = ReadInt(rawJob, "Weight");
+                job.Payment = ReadLong(rawJob, "Payment");
+                job.RawJob = rawJob;
+                if (job.JobId > 0)
+                {
+                    jobs.Add(job);
+                }
+            }
+
+            return jobs;
+        }
+
+        private bool TryUnloadOnboardCargoAtCurrentHarbor(ShipSnapshot ship, string prefix, List<OnboardJobInfo> onboardJobs)
+        {
+            if (unloadCommissionsFromShipMethod == null || commissionFactory == null)
+            {
+                AddDecisionLog(prefix + string.Format(
+                    "holding; {0} onboard job(s) are at {1}, but the native unload bridge is unavailable.",
+                    onboardJobs.Count,
+                    ship.CurrentHarbor));
+                return false;
+            }
+
+            try
+            {
+                unloadCommissionsFromShipMethod.Invoke(commissionFactory, new object[] { ship.PlayerShipId });
+                ClearNativeCargoGuard(ship);
+                if (setShipSmugglersWareMethod != null)
+                {
+                    setShipSmugglersWareMethod.Invoke(dsqLite, new object[] { ship.PlayerShipId, false });
+                    WriteField(ship.RawShip, "HasSmugglerswareLoaded", false);
+                }
+
+                AddDecisionLog(prefix + string.Format(
+                    "onboard cargo guard: forced native unload of {0} assigned job(s) at {1} before taking new work.",
+                    onboardJobs.Count,
+                    ship.CurrentHarbor));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AddDecisionLog(prefix + "holding; native unload of onboard cargo failed: " + UnwrapMessage(ex));
+                return false;
+            }
+        }
+
+        private static OnboardDestinationSummary ChooseOnboardCargoDestination(ShipSnapshot ship, List<OnboardJobInfo> jobs)
+        {
+            Dictionary<string, OnboardDestinationSummary> summaries = new Dictionary<string, OnboardDestinationSummary>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                OnboardJobInfo job = jobs[i];
+                if (IsNoneOrEmpty(job.End))
+                {
+                    continue;
+                }
+
+                if (ship != null && SameHarbor(job.End, ship.CurrentHarbor))
+                {
+                    continue;
+                }
+
+                OnboardDestinationSummary summary;
+                if (!summaries.TryGetValue(job.End, out summary))
+                {
+                    summary = new OnboardDestinationSummary();
+                    summary.Harbor = job.End;
+                    summaries[job.End] = summary;
+                }
+
+                summary.JobCount++;
+                summary.Volume += Math.Max(0, job.Volume);
+                summary.Weight += Math.Max(0, job.Weight);
+                summary.Payment += Math.Max(0L, job.Payment);
+            }
+
+            OnboardDestinationSummary best = null;
+            foreach (KeyValuePair<string, OnboardDestinationSummary> pair in summaries)
+            {
+                OnboardDestinationSummary summary = pair.Value;
+                if (best == null
+                    || summary.JobCount > best.JobCount
+                    || (summary.JobCount == best.JobCount && summary.Payment > best.Payment))
+                {
+                    best = summary;
+                }
+            }
+
+            return best;
+        }
+
+        private static bool SameHarbor(string left, string right)
+        {
+            return !IsNoneOrEmpty(left)
+                && !IsNoneOrEmpty(right)
+                && string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
         }
 
         private void HandleLowConditionShip(ShipSnapshot ship, string prefix, long reserve)
@@ -4114,6 +4342,27 @@ namespace TransOcean2FleetAutomation.Direct
             public float FirstSeenRealtime;
         }
 
+        private sealed class OnboardJobInfo
+        {
+            public int JobId;
+            public string Start;
+            public string End;
+            public string Freight;
+            public int Volume;
+            public int Weight;
+            public long Payment;
+            public object RawJob;
+        }
+
+        private sealed class OnboardDestinationSummary
+        {
+            public string Harbor;
+            public int JobCount;
+            public int Volume;
+            public int Weight;
+            public long Payment;
+        }
+
         private sealed class ShipSnapshot
         {
             public int PlayerShipId;
@@ -4523,7 +4772,7 @@ namespace TransOcean2FleetAutomation.Direct
                 }
 
                 int playerShipId = ReadInt(rawJob, "PlayerShipID");
-                if (playerShipId != 0 && playerShipId != 1 && playerShipId != ship.PlayerShipId)
+                if (playerShipId != 0 && playerShipId != 1)
                 {
                     return null;
                 }
