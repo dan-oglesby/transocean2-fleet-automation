@@ -54,6 +54,8 @@ namespace TransOcean2FleetAutomation.Direct
         private const int FleetNotificationMaxVisiblePerType = 3;
         private const float DispatchFuelReserveCapacityFraction = 0.03f;
         private const float StaleCastOutRecoveryCooldownSeconds = 20f;
+        private const float OwnedSubsidiaryRepairDistanceFactor = 0.75f;
+        private const double OwnedSubsidiaryUpgradeScoreBonus = 1500000.0;
         private const float MinSailConditionFloor = 1f;
         private const float MinSailConditionCeiling = 99f;
         private const float IdleRepositionDefaultDays = 7f;
@@ -99,6 +101,7 @@ namespace TransOcean2FleetAutomation.Direct
         private MethodInfo getPlayerShipMethod;
         private MethodInfo getAllJobsFromPlayerShipMethod;
         private MethodInfo getHarborFuelPriceMethod;
+        private MethodInfo getHarborSubsidiaryOwnerMethod;
         private MethodInfo getJobsFromStartHarborMethod;
         private MethodInfo getHarborMethod;
         private MethodInfo getFreightAttributesMethod;
@@ -1031,6 +1034,7 @@ namespace TransOcean2FleetAutomation.Direct
             getPlayerShipMethod = dsqLiteType.GetMethod("GetPlayerShip", new Type[] { typeof(int) });
             getAllJobsFromPlayerShipMethod = dsqLiteType.GetMethod("GetAllJobsFromPlayerShip", new Type[] { typeof(int) });
             getHarborFuelPriceMethod = dsqLiteType.GetMethod("GetHarborFuelPrice", new Type[] { typeof(string) });
+            getHarborSubsidiaryOwnerMethod = dsqLiteType.GetMethod("GetHarborSubsidiaryOwner", new Type[] { typeof(string) });
             updatePlayerShipAiStateMethod = dsqLiteType.GetMethod("UpdatePlayerShipAiState", new Type[] { typeof(int), typeof(bool) });
             updateJobPlayerShipMethod = dsqLiteType.GetMethod("UpdatePlayerShipIDFromJob", new Type[] { typeof(int), typeof(int) });
             setShipDontLoadJobsMethod = dsqLiteType.GetMethod("SetPlayerShipAIStateDontLoadJobs", new Type[] { typeof(int), typeof(bool) });
@@ -1838,20 +1842,29 @@ namespace TransOcean2FleetAutomation.Direct
                     destination.ArrivalCondition));
             }
 
-            return TrySendToServiceDock(ship, prefix, "repair", destination.Harbor, destination.Distance, destination.ArrivalCondition);
+            return TrySendToServiceDock(
+                ship,
+                prefix,
+                "repair",
+                destination.Harbor,
+                destination.Distance,
+                destination.ArrivalCondition,
+                destination.CompanyOwnedSubsidiary);
         }
 
-        private bool TrySendToServiceDock(ShipSnapshot ship, string prefix, string serviceName, string harbor, float distance, float arrivalCondition)
+        private bool TrySendToServiceDock(ShipSnapshot ship, string prefix, string serviceName, string harbor, float distance, float arrivalCondition, bool companyOwnedSubsidiary)
         {
+            string ownedNote = companyOwnedSubsidiary ? " (company-owned subsidiary)" : string.Empty;
             JobPlan offsetPlan = FindJobPlanToDestination(ship, ship.CurrentHarbor, harbor);
             if (offsetPlan != null)
             {
                 AddDecisionLog(prefix + string.Format(
-                    "{0} trip has {1} legal offset job(s) to {2}, pay {3:n0}.",
+                    "{0} trip to {2}{4} has {1} legal offset job(s), pay {3:n0}.",
                     Capitalize(serviceName),
                     offsetPlan.Jobs.Count,
                     harbor,
-                    offsetPlan.Payment));
+                    offsetPlan.Payment,
+                    ownedNote));
 
                 if (DispatchJobPlan(ship, offsetPlan, serviceName + " dock routing"))
                 {
@@ -1879,11 +1892,12 @@ namespace TransOcean2FleetAutomation.Direct
 
                 MarkShipDispatched(ship);
                 AddDecisionLog(prefix + string.Format(
-                    "routing to {0} dock at {1} ({2:0} distance units, arrival condition about {3:0}%) before taking more work.",
+                    "routing to {0} dock at {1}{4} ({2:0} distance units, arrival condition about {3:0}%) before taking more work.",
                     serviceName,
                     harbor,
                     distance,
-                    arrivalCondition));
+                    arrivalCondition,
+                    ownedNote));
                 return true;
             }
             catch (Exception ex)
@@ -1956,29 +1970,90 @@ namespace TransOcean2FleetAutomation.Direct
                     continue;
                 }
 
+                RepairDockCandidate candidate = CreateRepairDockCandidate(city, distance, arrivalCondition, false);
                 if (arrivalCondition >= safeArrivalFloor)
                 {
-                    if (best == null || distance < best.Distance)
+                    if (IsBetterRepairDockCandidate(candidate, best))
                     {
-                        best = new RepairDockCandidate();
-                        best.Harbor = city;
-                        best.Distance = distance;
-                        best.ArrivalCondition = arrivalCondition;
+                        best = candidate;
                     }
                 }
-                else if (emergency == null
-                    || arrivalCondition > emergency.ArrivalCondition
-                    || (Math.Abs(arrivalCondition - emergency.ArrivalCondition) < 0.1f && distance < emergency.Distance))
+                else
                 {
-                    emergency = new RepairDockCandidate();
-                    emergency.Harbor = city;
-                    emergency.Distance = distance;
-                    emergency.ArrivalCondition = arrivalCondition;
-                    emergency.EmergencySafetyFallback = true;
+                    candidate.EmergencySafetyFallback = true;
+                    if (IsBetterEmergencyRepairDockCandidate(candidate, emergency))
+                    {
+                        emergency = candidate;
+                    }
                 }
             }
 
             return best ?? emergency;
+        }
+
+        private RepairDockCandidate CreateRepairDockCandidate(string harbor, float distance, float arrivalCondition, bool emergency)
+        {
+            RepairDockCandidate candidate = new RepairDockCandidate();
+            candidate.Harbor = harbor;
+            candidate.Distance = distance;
+            candidate.ArrivalCondition = arrivalCondition;
+            candidate.EmergencySafetyFallback = emergency;
+            candidate.CompanyOwnedSubsidiary = IsCompanyOwnedSubsidiaryHarbor(harbor);
+            return candidate;
+        }
+
+        private bool IsBetterRepairDockCandidate(RepairDockCandidate candidate, RepairDockCandidate current)
+        {
+            if (candidate == null)
+            {
+                return false;
+            }
+
+            if (current == null)
+            {
+                return true;
+            }
+
+            float candidateScore = GetOwnedSubsidiaryAdjustedDistance(candidate);
+            float currentScore = GetOwnedSubsidiaryAdjustedDistance(current);
+            if (Math.Abs(candidateScore - currentScore) > 0.1f)
+            {
+                return candidateScore < currentScore;
+            }
+
+            return candidate.Distance < current.Distance;
+        }
+
+        private bool IsBetterEmergencyRepairDockCandidate(RepairDockCandidate candidate, RepairDockCandidate current)
+        {
+            if (candidate == null)
+            {
+                return false;
+            }
+
+            if (current == null)
+            {
+                return true;
+            }
+
+            if (Math.Abs(candidate.ArrivalCondition - current.ArrivalCondition) > 0.1f)
+            {
+                return candidate.ArrivalCondition > current.ArrivalCondition;
+            }
+
+            return IsBetterRepairDockCandidate(candidate, current);
+        }
+
+        private float GetOwnedSubsidiaryAdjustedDistance(RepairDockCandidate candidate)
+        {
+            if (candidate == null)
+            {
+                return float.MaxValue;
+            }
+
+            return candidate.CompanyOwnedSubsidiary
+                ? candidate.Distance * OwnedSubsidiaryRepairDistanceFactor
+                : candidate.Distance;
         }
 
         // Called when a ship is idle in a harbor with no legal work. After the ship has waited past the
@@ -2209,7 +2284,14 @@ namespace TransOcean2FleetAutomation.Direct
             SetNativeAiState(ship, false);
             ClearNativeCargoGuard(ship);
             SetPlannedFreightUpgrade(ship, destination.Plan.UpgradeId);
-            bool routed = TrySendToServiceDock(ship, prefix, "upgrade", destination.Harbor, destination.Distance, destination.ArrivalCondition);
+            bool routed = TrySendToServiceDock(
+                ship,
+                prefix,
+                "upgrade",
+                destination.Harbor,
+                destination.Distance,
+                destination.ArrivalCondition,
+                destination.Plan.CompanyOwnedSubsidiary);
             if (!routed)
             {
                 ClearPlannedFreightUpgrade(ship);
@@ -2279,13 +2361,15 @@ namespace TransOcean2FleetAutomation.Direct
                 WriteField(rawShip, "Upgrade" + plan.Slot, plan.UpgradeId);
                 ClearPlannedFreightUpgrade(ship);
 
+                string ownedNote = plan.CompanyOwnedSubsidiary ? " (company-owned subsidiary)" : string.Empty;
                 AddDecisionLog(prefix + string.Format(
-                    "upgrade started at {0}: {1} (ID {2}, slot {3}) for about {4:n0} credits.",
+                    "upgrade started at {0}{5}: {1} (ID {2}, slot {3}) for about {4:n0} credits.",
                     ship.CurrentHarbor,
                     plan.Name,
                     plan.UpgradeId,
                     plan.Slot,
-                    plan.EstimatedCost));
+                    plan.EstimatedCost,
+                    ownedNote));
                 return true;
             }
             catch (Exception ex)
@@ -2417,7 +2501,8 @@ namespace TransOcean2FleetAutomation.Direct
                 plan.Slot = slot;
                 plan.Name = GetUpgradeName(upgradeId);
                 plan.EstimatedCost = cost;
-                plan.Score = ScoreUpgradeCandidate(ship, harborName, upgradeId, cost);
+                plan.CompanyOwnedSubsidiary = IsCompanyOwnedSubsidiaryHarbor(harborName);
+                plan.Score = ScoreUpgradeCandidate(ship, harborName, upgradeId, cost, plan.CompanyOwnedSubsidiary);
                 plan.Region = GetRegionOfHarbor(harborName);
                 plan.UpgradeDockOwner = GetUpgradeDockOwner(plan.Region);
                 plan.UpgradeDockOwnerShares = EstimateUpgradeDockOwnerShares(plan.Region, cost);
@@ -3113,9 +3198,14 @@ namespace TransOcean2FleetAutomation.Direct
             return false;
         }
 
-        private double ScoreUpgradeCandidate(ShipSnapshot ship, string harborName, int upgradeId, long estimatedCost)
+        private double ScoreUpgradeCandidate(ShipSnapshot ship, string harborName, int upgradeId, long estimatedCost, bool companyOwnedSubsidiary)
         {
             double score = GetBaseUpgradeUtility(upgradeId) - (estimatedCost * 0.02);
+            if (companyOwnedSubsidiary)
+            {
+                score += OwnedSubsidiaryUpgradeScoreBonus;
+            }
+
             if (IsFreightUpgrade(upgradeId))
             {
                 score += EstimateFreightUpgradeOpportunity(ship, harborName, upgradeId);
@@ -3317,6 +3407,23 @@ namespace TransOcean2FleetAutomation.Direct
             catch
             {
                 return 0;
+            }
+        }
+
+        private bool IsCompanyOwnedSubsidiaryHarbor(string harborName)
+        {
+            if (getHarborSubsidiaryOwnerMethod == null || playerId <= 0 || string.IsNullOrEmpty(harborName) || harborName == "None")
+            {
+                return false;
+            }
+
+            try
+            {
+                return ToInt(getHarborSubsidiaryOwnerMethod.Invoke(dsqLite, new object[] { harborName })) == playerId;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -4914,6 +5021,7 @@ namespace TransOcean2FleetAutomation.Direct
             public float Distance;
             public float ArrivalCondition;
             public bool EmergencySafetyFallback;
+            public bool CompanyOwnedSubsidiary;
         }
 
         private sealed class UpgradePlan
@@ -4928,6 +5036,7 @@ namespace TransOcean2FleetAutomation.Direct
             public long UpgradeDockOwnerShares;
             public long EstimatedCost;
             public double Score;
+            public bool CompanyOwnedSubsidiary;
         }
 
         private sealed class UpgradeDockCandidate

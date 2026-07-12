@@ -170,6 +170,29 @@ Current implementation notes:
 - If a ship is still in `MINIGAME_CASTOUT` after the normal dispatch settle window, `TryRecoverStaleCastOut(...)` verifies/refuels and retries the same already-set destination, with a 20-real-second cooldown.
 - Repair dock selection still prefers the nearest dock that satisfies the sink-risk threshold plus 10% cushion. If none exists, it can pick the best zero-native-sink-risk emergency dock below that cushion and logs `emergency repair routing`.
 
+### Owned subsidiary service-port preference (2026-07-12)
+
+The user wants automated repairs/upgrades to lean toward ports the company owns. Use harbor-level subsidiary ownership, not regional business-share ownership:
+
+- Native API: `DynamicSQLiteController.GetHarborSubsidiaryOwner(string harbor)`.
+- Helper: `IsCompanyOwnedSubsidiaryHarbor(harborName)` compares that owner id to current `playerId`.
+- Repair routing: owned repair candidates use `OwnedSubsidiaryRepairDistanceFactor = 0.75`, so an owned repair dock can beat a somewhat closer neutral dock while normal/emergency sink safety remains dominant.
+- Upgrade routing: owned upgrade harbors add `OwnedSubsidiaryUpgradeScoreBonus = 1,500,000` to `ScoreUpgradeCandidate(...)`, which should win close calls but not override a clearly better upgrade/cargo opportunity.
+- Service-route decision logs annotate selected owned harbors with `(company-owned subsidiary)`.
+
+### Refactor assessment (2026-07-12)
+
+`src/TransOcean2FleetAutomationDirect.cs` is now about 5,300 lines with roughly 200 method-like declarations in a single `FleetAutomationCaptainBehaviour`. The behavior is working, but refactor pressure is real because UI, reflection binding, native mutations, cargo planning, repair planning, upgrade planning, fuel/recovery, and popup/newsticker watchdogs all share mutable fields.
+
+Recommended staged refactor, after the current live behavior has another good test run:
+
+1. Extract a `NativeGameBridge` wrapper for reflection handles and side-effect calls (`RefreshControllers`, refuel, dispatch, repair, upgrade, events, field reads/writes). Keep return values/log messages identical at first.
+2. Extract pure-ish strategy services: `CargoRoutePlanner`, `RepairPlanner`, `UpgradePlanner`, `ServicePortScorer`. These should consume snapshots/native query delegates and return plans, not mutate game state.
+3. Keep `FleetAutomationCaptainBehaviour` as orchestration/UI only: refresh snapshots, call planners, then call bridge actions.
+4. Add small deterministic tests around owned-port scoring, fuel top-up math, repair emergency fallback, cargo packing, and upgrade diversity before making ranking changes more aggressive.
+
+Do not do a broad mechanical split while investigating a live gameplay bug; make one extraction per commit and build/install after each step.
+
 If an enabled ship disappears from `GetALLPlayerShips`, the next active fleet refresh logs `enabled ship is missing from the native player ship list`. The July 2026 short run showed `#1976 Skaald` drop out this way after native logs said `GetPlayerIDFromPlayerShip - PlayerShip in playerShips database not found. PlayerShipID: 1976`; an earlier run showed the same signature for `#3201 Lorken`.
 
 The route lookahead is intentionally advisory. It does not accept future-harbor jobs early and it does not mix cargo for multiple destinations into one native route. It only nudges the first destination toward harbors with better follow-on work, then lets the next automation tick re-evaluate after arrival.
